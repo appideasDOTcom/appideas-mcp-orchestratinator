@@ -75,13 +75,17 @@ const el = {
  * views' lists over one payload.
  */
 
-/** The channels drawn as cards, rows and choices: everything not put away. */
-function onBoard(channels) { return (channels ?? []).filter((c) => !c.archived); }
+/** Whether a floor is in the building shown (the buildings section, below). A floor the payload files nowhere is shown everywhere, never lost. */
+function inBuildingNow(c, id) { return !id || !c?.building || c.building === id; }
+
+/** The channels drawn as cards, rows and choices: everything not put away, in the building shown. */
+function onBoard(channels, b = globalThis.buildings?.current?.() ?? null) { return (channels ?? []).filter((c) => !c.archived && inBuildingNow(c, b)); }
 
 /** The channels drawn only as pills — same members, same order, on both views. */
-function putAway(channels) {
-  return (channels ?? []).filter((c) => c.archived).sort((a, b) => a.channel.localeCompare(b.channel));
+function putAway(channels, b = globalThis.buildings?.current?.() ?? null) {
+  return (channels ?? []).filter((c) => c.archived && inBuildingNow(c, b)).sort((a, b2) => a.channel.localeCompare(b2.channel));
 }
+
 
 /** What a picker, a filter or a dropdown may offer: never a put-away floor. */
 function pickable(channels) { return onBoard(channels).map((c) => c.channel); }
@@ -140,6 +144,73 @@ const ui = {
   promptRows: [],
   promptEdit: null,
 };
+
+/* ---------- buildings: what the page decides ---------- */
+
+/*
+ * A board holds several buildings, and a building is a bucket of floors
+ * (src/db.js, `buildings`; the service round, 2026-11-24). Both views show
+ * one building at a time, and every list on the page (the cards, the floor
+ * picker, the pills, a dialog's floors) is that building's, because they all
+ * read onBoard and putAway. Which one is shown is the address's
+ * `?building=<id>` when it names one, else this browser's last choice, else
+ * the default. A board with one building looks exactly as it did before.
+ */
+
+/** The building to show: the one asked for when the board has it, else the default. */
+function buildingNow(buildings, wanted) {
+  const list = buildings ?? [];
+  if (wanted && list.some((b) => b.id === wanted)) return wanted;
+  return list.find((b) => b.default)?.id ?? list[0]?.id ?? null;
+}
+
+
+/** A building chip's link: that building, on its whole set of floors. */
+const buildingHref = (id) => `?${new URLSearchParams({ building: id, floor: '' })}`;
+
+/** The picker: nothing with one building, a chip each with two or more. */
+function buildingChips(buildings, shown) {
+  const list = buildings ?? [];
+  if (list.length < 2) return '';
+  return list.map((b) => `<a class="chip${b.id === shown ? ' on' : ''}" href="${esc(buildingHref(b.id))}" data-building="${esc(b.id)}" title="${esc(`The ${b.name} building`)}">${esc(b.name)}</a>`).join('');
+}
+
+/* ---------- end buildings ---------- */
+
+/** What the address asked for, then the stored choice. */
+let buildingWanted = (() => {
+  const q = new URLSearchParams(location.search);
+  if (q.get('building')) return q.get('building');
+  try { return localStorage.getItem('orch.building') || null; } catch { return null; }
+})();
+/** The buildings as the last payload said them: either view's, whichever answered last. */
+let buildingsSeen = [];
+function noteBuildings(list) { if (Array.isArray(list)) buildingsSeen = list; }
+function currentBuilding() { return buildingNow(buildingsSeen, buildingWanted); }
+
+/** Show another building: kept in the address and in this browser, both views redrawn. */
+function setBuilding(id) {
+  buildingWanted = id || null;
+  try { localStorage.setItem('orch.building', buildingWanted ?? ''); } catch { /* not worth failing over */ }
+  try {
+    const q = new URLSearchParams(location.search);
+    if (buildingWanted) q.set('building', buildingWanted); else q.delete('building');
+    q.set('floor', '');
+    history.replaceState(history.state, '', `${location.pathname}?${q}${location.hash}`);
+  } catch { /* the address is only for a reload */ }
+  ui.lastChannelSig = null;
+  window.floorSetFloor?.(null);
+  drawBuildingPick();
+  tick();
+}
+
+function drawBuildingPick() {
+  const pick = document.getElementById('building-pick');
+  if (!pick) return;
+  const html = buildingChips(buildingsSeen, currentBuilding());
+  if (pick.dataset.sig !== html) { pick.dataset.sig = html; pick.innerHTML = html; }
+}
+window.buildings = { note: (list) => { noteBuildings(list); drawBuildingPick(); }, current: () => currentBuilding(), set: setBuilding, list: () => buildingsSeen };
 
 /* ---------- formatting ---------- */
 
@@ -1428,6 +1499,7 @@ function toolsPanel(compact = IN_APP) {
   return `
     ${autoRefreshSection(compact)}
     ${floorsSection()}
+    ${buildingsSection(compact)}
     ${updatesSection(ui.state?.update, compact)}
     <div class="set-tool">
       <div>
@@ -1550,6 +1622,90 @@ function floorsSection() {
         <option value="window"${mode === 'window' ? ' selected' : ''}>In windows</option>
       </select>
     </div>`;
+}
+
+/**
+ * Buildings: make one, rename one, delete an empty one, and say which
+ * building each floor is in. In Settings, because with one building there
+ * is no picker in the header to hang a control on, and the desktop app's
+ * Settings pane is this page (SETTINGS_PAGE), so it is there too.
+ */
+function buildingsSection(compact = IN_APP) {
+  const list = ui.state?.buildings ?? buildingsSeen;
+  if (!list.length) return '';
+  const floors = (ui.state?.channels ?? []).map((c) => ({ channel: c.channel, building: c.building, archived: c.archived }))
+    .sort((a, b) => a.channel.localeCompare(b.channel));
+  const count = (id) => floors.filter((f) => f.building === id).length;
+  const rows = list.map((b) => {
+    const n = count(b.id);
+    const why = b.default ? 'The default building, where new floors arrive. It can be renamed, not deleted.'
+      : n ? `Move its ${n} floor${n === 1 ? '' : 's'} to another building first.` : 'Delete this empty building';
+    return `<div class="set-bld" data-building-row="${esc(b.id)}">
+        <input class="input" type="text" maxlength="60" value="${esc(b.name)}" data-building-name="${esc(b.id)}" aria-label="Name of the ${esc(b.name)} building">
+        <span class="muted tiny">${n} floor${n === 1 ? '' : 's'}${b.default ? ' · default' : ''}</span>
+        <button type="button" class="btn" data-set="building-rename" data-id="${esc(b.id)}">Rename</button>
+        <button type="button" class="btn danger" data-set="building-delete" data-id="${esc(b.id)}" title="${esc(why)}"${b.default || n ? ' disabled' : ''}>Delete</button>
+      </div>`;
+  }).join('');
+  const options = (sel) => list.map((b) => `<option value="${esc(b.id)}"${b.id === sel ? ' selected' : ''}>${esc(b.name)}</option>`).join('');
+  const floorRows = list.length < 2 ? '' : floors.map((f) => `<div class="set-bld-floor">
+        <span class="mono">${esc(f.channel)}</span>${f.archived ? ' <span class="muted tiny">archived</span>' : ''}
+        <select class="input" data-set-floor-building="${esc(f.channel)}" aria-label="Building for ${esc(f.channel)}">${options(f.building)}</select>
+      </div>`).join('');
+  return `
+    <div class="set-tool set-buildings" id="set-buildings">
+      <div>
+        <h4 class="set-h">Buildings</h4>
+        ${compact ? '' : '<p>A building is a set of floors. Each floor is in one, and the header shows one building at a time once there are two. Floors keep their names; nothing an agent does changes.</p>'}
+        ${rows}
+        <div class="set-bld">
+          <input class="input" type="text" maxlength="60" id="building-new" placeholder="New building name" aria-label="New building name">
+          <button type="button" class="btn primary" data-set="building-create">Add building</button>
+        </div>
+        ${floorRows ? `<h4 class="set-h">Which building each floor is in</h4>${floorRows}` : ''}
+        <div class="set-bld-err set-err" hidden></div>
+      </div>
+    </div>`;
+}
+
+/** Redraw the section when what it shows changed, but never under a field being typed in. */
+function renderBuildingsSection() {
+  if (!(el.setDlg.open || SETTINGS_PAGE)) return;
+  const sec = el.setBody.querySelector('#set-buildings');
+  if (!sec) return;
+  if (sec.contains(document.activeElement) && document.activeElement.matches('input, select')) return;
+  const html = buildingsSection().trim();
+  if (sec.outerHTML.trim() === html) return;
+  const box = document.createElement('div');
+  box.innerHTML = html;
+  if (box.firstElementChild) sec.replaceWith(box.firstElementChild);
+}
+
+async function buildingAct(path, body) {
+  const sec = el.setBody.querySelector('#set-buildings');
+  const err = sec?.querySelector('.set-bld-err');
+  if (err) { err.hidden = true; err.textContent = ''; }
+  try {
+    const res = await fetch(`./api/admin/${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
+    ui.state = await getJson('./api/state');
+    noteBuildings(ui.state.buildings);
+    drawBuildingPick();
+    // Drawn from the answer just fetched. The tick below draws it too, but
+    // a poll already in flight was asked before this action and returns at
+    // once, so this is the draw that is sure to be current. A page mutant
+    // dropping it survives check-buildings by design: the next poll repaints.
+    document.activeElement?.blur?.();
+    renderBuildingsSection();
+    ui.lastChannelSig = null;
+    tick();
+    return json;
+  } catch (e) {
+    const now = el.setBody.querySelector('#set-buildings .set-bld-err');
+    if (now) { now.hidden = false; now.textContent = e.message ?? String(e); }
+    return null;
+  }
 }
 
 function renderSettings() {
@@ -1725,6 +1881,16 @@ async function restoreBackup() {
 
 el.openSettings.addEventListener('click', () => openSettings());
 
+// A building chip is a link, so ⌘-click and middle-click open it elsewhere,
+// as a floor chip's do; a plain click stays in the page.
+document.getElementById('building-pick')?.addEventListener('click', (e) => {
+  const a = e.target.closest('[data-building]');
+  if (!a) return;
+  if ((e.button ?? 0) !== 0 || e.metaKey || e.ctrlKey || e.shiftKey) return;
+  e.preventDefault();
+  setBuilding(a.dataset.building);
+});
+
 el.setDlg.addEventListener('click', (e) => {
   // The same rule as the operator dialog (holdsTyping): once a file is chosen
   // the dialog carries type-RESTORE, and a click outside it does not close.
@@ -1744,6 +1910,17 @@ el.setBody.addEventListener('click', (e) => {
     case 'export': exportBackup(); break;
     case 'restore': restoreBackup(); break;
     case 'restore-floor': restoreFloor(); break;
+    case 'building-create': {
+      const input = el.setBody.querySelector('#building-new');
+      buildingAct('building/create', { name: input?.value ?? '' });
+      break;
+    }
+    case 'building-rename': {
+      const input = el.setBody.querySelector(`[data-building-name="${CSS.escape(btn.dataset.id)}"]`);
+      buildingAct('building/rename', { id: btn.dataset.id, name: input?.value ?? '' });
+      break;
+    }
+    case 'building-delete': buildingAct('building/delete', { id: btn.dataset.id }); break;
     default: break;
   }
 });
@@ -1753,6 +1930,8 @@ el.setBody.addEventListener('change', (e) => {
   if (auto) { setAutoRefresh(auto.checked); return; }
   const open = e.target.closest('[data-set-floor-open]');
   if (open) { window.floorOpen?.set(open.value); return; }
+  const fb = e.target.closest('[data-set-floor-building]');
+  if (fb) { buildingAct('floor/building', { channel: fb.dataset.setFloorBuilding, building: fb.value }); return; }
   const input = e.target.closest('#restore-file');
   if (!input?.files?.[0]) return;
   chooseBackupFile(input.files[0]);
@@ -2129,6 +2308,8 @@ async function tick({ background = false } = {}) {
   try {
     if (POPOUT || SETTINGS_PAGE) {
       ui.state = await getJson('./api/state');
+      noteBuildings(ui.state.buildings);
+      renderBuildingsSection();
       // The settings page is drawn whole once, on its first state, and
       // patched after that like the dialog (renderUpdate), so a chosen
       // backup file and a half-typed RESTORE survive every poll.
@@ -2149,6 +2330,9 @@ async function tick({ background = false } = {}) {
     ]);
     ui.hasMore = activity.count >= ui.limit;
     ui.state = state;
+    noteBuildings(state.buildings);
+    drawBuildingPick();
+    renderBuildingsSection();
     renderServer(state);
     renderUpdate(state);
     syncChannelFilter(state);
@@ -2324,7 +2508,7 @@ el.dlgBody.addEventListener('click', (e) => {
       break;
     case 'desk-take': {
       readDeskForm();
-      const body = takeBody(ui.deskForm);
+      const body = { ...takeBody(ui.deskForm), ...newFloorBuilding(ui.deskForm) };
       // Where this folder sits is where the next dialog opens — however it
       // was chosen, the dialog, a recent row or the page's own list.
       rememberDir(localStorage, body.host_id, ui.deskForm.listing?.parent ?? null);
@@ -2351,7 +2535,7 @@ el.dlgBody.addEventListener('click', (e) => {
       // "New desk here": the folder's agent, seated on this floor as well.
       // Waited for like a move, and said in the dialog if the host refuses.
       readDeskForm();
-      const body = takeBody(ui.deskForm, { seat: true });
+      const body = { ...takeBody(ui.deskForm, { seat: true }), ...newFloorBuilding(ui.deskForm) };
       rememberDir(localStorage, body.host_id, ui.deskForm.listing?.parent ?? null);
       const beside = ui.deskForm.listing?.self?.bound ?? null;
       const hostName = (ui.deskForm.hosts ?? []).find((h) => h.host_id === body.host_id)?.name ?? null;
@@ -2691,6 +2875,12 @@ function rememberDir(storage, hostId, dir) {
   } catch { /* not worth failing over */ }
 }
 
+/** A new floor typed in Take a desk is made in the building on screen. */
+function newFloorBuilding(fm) {
+  const b = currentBuilding();
+  return fm.channel === '__new__' && b ? { building: b } : {};
+}
+
 /**
  * What a take sends: the host, the folder, the floor and the agent.
  *
@@ -2963,7 +3153,10 @@ async function loadFolders() {
     const res = await fetch('./api/floor/folders');
     const json = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
-    fm.hosts = json.hosts ?? [];
+    // Seen through the service (contract board.relay), a host's own folder
+    // dialog would open on a screen nobody here is at, and the board refuses
+    // it: the page's own list is the way, as for a host with no dialog.
+    fm.hosts = (json.hosts ?? []).map((h) => (ui.state?.viewer?.remote ? { ...h, dialog: false } : h));
     fm.names = json.names ?? {};
     fm.error = null;
   } catch (e) {

@@ -9,6 +9,7 @@ import { openDb, makeStore } from './db.js';
 import { registerTools } from './tools.js';
 import { createWebRouter } from './web.js';
 import { createAuth } from './auth.js';
+import { createRelay } from './relay.js';
 import { buildCommit } from './build-info.js';
 import { createUpdates } from './updates.js';
 import { createUploads } from './uploads.js';
@@ -50,6 +51,10 @@ const STARTED_AT = new Date().toISOString();
 const db = openDb(DB_PATH);
 const store = makeStore(db);
 const auth = createAuth();
+// A request relayed through the desktop app's tunnel says who it is from,
+// signed (contract board.relay; src/relay.js). Made at start so a short
+// secret fails the start instead of serving relayed requests unchecked.
+const relay = createRelay();
 
 const app = express();
 
@@ -99,6 +104,9 @@ app.use((req, res, next) => {
 app.set('trust proxy', process.env.TRUST_PROXY ?? 'loopback');
 // Ahead of the body parser: an unauthorized caller shouldn't get 4mb of parsing
 // done on its behalf. /health stays open — the container healthcheck uses it.
+// Ahead of everything that reads a request: a relayed one is verified or
+// refused here, and every route after it can ask who it is from.
+app.use(relay.middleware);
 app.use('/mcp', auth.mcpGuard);
 // A restored backup is one JSON document holding an entire board, so it needs
 // headroom no other route should get. Chosen per-path rather than by raising the
@@ -456,4 +464,5 @@ app.listen(PORT, HOST, () => {
   console.log(`[orchestratinator] MCP       http://localhost:${PORT}/mcp`);
   console.log(`[orchestratinator] dashboard http://localhost:${PORT}/   (db: ${DB_PATH})`);
   console.log(`[orchestratinator] ${auth.describeStartup()}`);
+  console.log(`[orchestratinator] ${relay.describe()}`);
 });

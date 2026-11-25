@@ -4910,6 +4910,14 @@
       toClaude.classList.add('hidden');
       tmuxCmd.classList.add('hidden');
     }
+    // Seen through the service (contract board.relay), the editor and a
+    // terminal would open on the board machine's own screen, where the person
+    // looking is not, and the board refuses both (relay_local_only). Absent,
+    // not dimmed: nothing about this desk makes them pressable from here.
+    if (floor.viewer?.remote) {
+      toVsc.classList.add('hidden');
+      toClaude.classList.add('hidden');
+    }
     // The picker wants a live host — the list and the reopen are its work —
     // and nothing else: an editor holding the conversation is a fact the
     // dialog shows on the rows, not a reason to hide the door. Held flat
@@ -5136,10 +5144,15 @@
       // After a while the button is back beside the spinner: a sign-in that
       // failed says so in the conversation, and the remedy is pressing again.
       const again = waiting && Date.now() - pressed > SIGNIN_AGAIN_MS;
-      const sig = `signin|${si.ok}|${si.reason ?? ''}|${si.host}|${waiting}|${again}`;
+      // Seen through the service, the sign-in's browser would open on the
+      // host's screen, where the person looking is not (relay_local_only):
+      // dimmed, with that said, rather than a press the board refuses.
+      const remote = !!floor.viewer?.remote;
+      const sig = `signin|${si.ok}|${si.reason ?? ''}|${si.host}|${waiting}|${again}|${remote}`;
       if (alertSlot.dataset.sig !== sig) {
         alertSlot.dataset.sig = sig;
-        const button = `<button class="btn${waiting ? '' : ' primary'}" data-act="signin"${si.ok ? '' : ' disabled'} title="Claude Code\u2019s own sign-in, run on ${esc(si.host)}: the browser opens there">${waiting ? 'Sign in again' : 'Sign in'}</button>`;
+        const signTitle = remote ? `Sign in opens a browser on ${si.host}, and you are not at it. Sign in there when you are back.` : `Claude Code\u2019s own sign-in, run on ${si.host}: the browser opens there`;
+        const button = `<button class="btn${waiting ? '' : ' primary'}" data-act="signin"${si.ok && !remote ? '' : ' disabled'} title="${esc(signTitle)}">${waiting ? 'Sign in again' : 'Sign in'}</button>`;
         alertSlot.innerHTML = `<div class="p-alert p-alert-ask p-signin">
              <div><b>Claude Code is signed out on ${esc(si.host)}</b> \u2014 its Claude Code cannot answer until it is signed in again.</div>
              ${waiting ? `<div class="p-reading"><span class="pspin" aria-hidden="true"></span>finish signing in, in the browser that opened on ${esc(si.host)}\u2026</div>` : ''}
@@ -8236,7 +8249,9 @@
     recordDeskScale();
     // Ages and counts in the open card tick with everything else.
     renderDetails();
-    const t = floor.totals ?? {};
+    // With several buildings the line is about the one shown, counted from
+    // its floors here; the payload's totals are the whole board's.
+    const t = (floor.buildings?.length ?? 0) > 1 ? buildingTotals(here, floor.queue) : (floor.totals ?? {});
     $('floor-totals').textContent =
       `${t.channels ?? 0} floor${t.channels === 1 ? '' : 's'} · ${t.desks ?? 0} desk${t.desks === 1 ? '' : 's'} · ${t.live ?? 0} here · ${t.awaiting ?? 0} need you`;
     renderPanel();
@@ -8291,6 +8306,21 @@
     },
   };
 
+  /** The totals line for one building's floors: the payload's own numbers, summed over them. */
+  function buildingTotals(here, queue) {
+    const names = new Set(here.map((c) => c.channel));
+    return {
+      channels: here.length,
+      desks: here.reduce((n, c) => n + c.desks.length, 0),
+      live: here.reduce((n, c) => n + c.live, 0),
+      awaiting: (queue ?? []).filter((q) => names.has(q.channel)).length,
+    };
+  }
+
+  // The building picker (app.js) puts a tab back on all floors when it
+  // changes building: a floor of the last building is not one of this one's.
+  window.floorSetFloor = (name) => { if (ui.floorTab) setFloor(name); };
+
   /** Ride to a floor, or back out to the building. */
   function setFloor(name) {
     ui.floorFilter = name || null;
@@ -8324,7 +8354,7 @@
   async function pollOnce() {
     try {
       const r = await fetch('./api/floor', { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(POLL_TIMEOUT_MS) });
-      if (r.ok) { floor = await r.json(); floorRead = true; }
+      if (r.ok) { floor = await r.json(); floorRead = true; window.buildings?.note(floor.buildings); }
     } catch { /* the board's own dot already reports the connection */ }
     // Meetings kept with no window (0.14.4): boxed as if a room had them.
     if (ui.floorTab) keepHeld();

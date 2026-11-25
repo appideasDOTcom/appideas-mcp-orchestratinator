@@ -2073,3 +2073,12 @@ body.meeting .deskpanel { display: flex; flex-direction: column; }
 .canary-warn ul { margin: 4px 0 0 18px; padding: 0; }
 .canary-warn li { margin: 2px 0; }
 .canary-warn .mono { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+
+/* Buildings (the service round, 2026-11-24): the header's picker and the
+   Settings section. */
+#building-pick:empty { display: none; }
+#building-pick a.chip { text-decoration: none; display: inline-block; }
+.set-buildings .set-bld { display: flex; gap: 6px; align-items: center; margin: 4px 0; }
+.set-buildings .set-bld input[type="text"] { flex: 1; min-width: 0; }
+.set-buildings .set-bld-floor { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin: 2px 0; }
+.set-buildings .set-bld-floor select { max-width: 50%; }

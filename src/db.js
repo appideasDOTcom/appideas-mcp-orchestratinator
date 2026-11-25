@@ -2,7 +2,10 @@ import './node-floor.js';
 import Database from 'better-sqlite3';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { randomBytes } from 'node:crypto';
 import { shirtForSeat } from './palette.js';
+import { SERVER_CHANNEL } from './auth.js';
+import { relayedBy } from './relay.js';
 
 /**
  * Open (and migrate) the SQLite database.
@@ -77,6 +80,24 @@ export function openDb(path) {
       archived_at TEXT,
       archived_by TEXT
     );
+
+    -- Buildings (the service round, costmo 2026-11-24): a board holds many,
+    -- and every floor belongs to one. A bucket of floors and no more: a floor
+    -- (a channel) is still named once per board, and nothing an agent does
+    -- reads which building it is in. The id is opaque and stable across
+    -- renames (b_ + 10 base32), because the desktop app registers it with
+    -- the service, which never needs a floor's name. Exactly one row is the
+    -- default (ensureDefaultBuilding), and a floor with no building of its
+    -- own (channel_flags.building_id NULL, or naming a building that is not
+    -- here, as after a one-floor restore from another board) is in it, so
+    -- every board from before this is unchanged: one building, every floor.
+    CREATE TABLE IF NOT EXISTS buildings (
+      id          TEXT PRIMARY KEY,
+      name        TEXT NOT NULL,
+      is_default  INTEGER NOT NULL DEFAULT 0,
+      created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_buildings_name ON buildings(name COLLATE NOCASE);
 
     -- The same flag one level down (issue #20): a desk the operator has put
     -- away by hand. Shared and audited like archive, and for the same reason
@@ -530,6 +551,12 @@ export function openDb(path) {
   // leave takes the entry out of.
   addColumn(db, 'hosted_desks', 'scope', 'TEXT');
 
+  // Which building a floor is in. On channel_flags because that is already
+  // the row an operator's statement about a floor lives on: it is backed up,
+  // restored one floor at a time, and swept by purgeChannel with the floor.
+  addColumn(db, 'channel_flags', 'building_id', 'TEXT');
+  ensureDefaultBuilding(db);
+
   migratePersonas(db);
   migrateAgentNames(db);
   addColumn(db, 'agent_profile', 'shirt', 'TEXT');
@@ -637,6 +664,42 @@ function migrateAgentNames(db) {
   ).run().changes;
   db.exec(`DROP TABLE agent_names`);
   console.log(`[db] agent_names -> agent_profile (${moved} name${moved === 1 ? '' : 's'} carried over)`);
+}
+
+/** The default building's name on a board that has never had one. */
+export const DEFAULT_BUILDING_NAME = 'Main';
+
+/** An opaque building id: b_ and ten base32 characters (50 bits). */
+export function newBuildingId() {
+  const alphabet = 'abcdefghijklmnopqrstuvwxyz234567';
+  const bytes = randomBytes(10);
+  let id = 'b_';
+  for (const b of bytes) id += alphabet[b & 31];
+  return id;
+}
+
+/**
+ * Exactly one default building, made on a board that has none: at first
+ * open (every board from before buildings), and after a restore from a
+ * file written before them, which leaves this table untouched or empties
+ * it. Two defaults (a restore of a hand-edited file) keep the oldest.
+ */
+export function ensureDefaultBuilding(db) {
+  const defaults = db.prepare('SELECT id FROM buildings WHERE is_default = 1 ORDER BY created_at, id').all();
+  if (defaults.length === 1) return defaults[0].id;
+  if (defaults.length > 1) {
+    db.prepare('UPDATE buildings SET is_default = 0 WHERE is_default = 1 AND id != ?').run(defaults[0].id);
+    return defaults[0].id;
+  }
+  // A board whose buildings all lost the mark keeps its oldest as the default.
+  const oldest = db.prepare('SELECT id FROM buildings ORDER BY created_at, id LIMIT 1').get();
+  if (oldest) {
+    db.prepare('UPDATE buildings SET is_default = 1 WHERE id = ?').run(oldest.id);
+    return oldest.id;
+  }
+  const id = newBuildingId();
+  db.prepare('INSERT INTO buildings (id, name, is_default) VALUES (?, ?, 1)').run(id, DEFAULT_BUILDING_NAME);
+  return id;
 }
 
 function addColumn(db, table, column, decl) {
@@ -778,6 +841,7 @@ export const BACKUP_TABLES = [
   'tasks',
   'agents',
   'channel_flags',
+  'buildings',
   'desk_flags',
   'admin_events',
   'personas',
@@ -917,7 +981,7 @@ export function makeStore(db) {
       `INSERT INTO admin_events (channel, action, actor, target, detail)
        VALUES (@channel, @action, @actor, @target, @detail)`
     ),
-    listChannelFlags: db.prepare(`SELECT channel, archived_at, archived_by FROM channel_flags`),
+    listChannelFlags: db.prepare(`SELECT channel, archived_at, archived_by, building_id FROM channel_flags`),
     // The tasks a desk has to do: open ones assigned to it and the ones it
     // has claimed (wakeDue in src/floor.js).
     wakeTasks: db.prepare(
@@ -1649,6 +1713,90 @@ export function makeStore(db) {
     db.prepare('DELETE FROM desk_flags WHERE channel = ? AND agent = ?').run(channel, agent);
   });
 
+  /* ---------- buildings ---------- */
+
+  const BUILDING_NAME_MAX = 60;
+  function listBuildings() {
+    return db.prepare('SELECT id, name, is_default, created_at FROM buildings ORDER BY is_default DESC, created_at, id').all()
+      .map((b) => ({ id: b.id, name: b.name, default: b.is_default === 1, created_at: b.created_at }));
+  }
+  function floorBuildings(channels = q.listAllChannels.all().map((r) => r.channel)) {
+    const known = new Set(db.prepare('SELECT id FROM buildings').all().map((r) => r.id));
+    const def = ensureDefaultBuilding(db);
+    const own = new Map(db.prepare('SELECT channel, building_id FROM channel_flags WHERE building_id IS NOT NULL').all()
+      .map((r) => [r.channel, r.building_id]));
+    const out = new Map();
+    for (const c of channels) {
+      const b = own.get(c);
+      out.set(c, b && known.has(b) ? b : def);
+    }
+    return out;
+  }
+  /** A name an operator typed: trimmed, one line, not empty, not too long, not taken. */
+  function buildingNameError(name, exceptId = null) {
+    if (typeof name !== 'string' || !name.trim()) return 'A building needs a name.';
+    if (/[\r\n]/.test(name)) return 'A building name is one line.';
+    if (name.trim().length > BUILDING_NAME_MAX) return `A building name is at most ${BUILDING_NAME_MAX} characters.`;
+    const taken = db.prepare('SELECT id, name FROM buildings WHERE name = ? COLLATE NOCASE').get(name.trim());
+    if (taken && taken.id !== exceptId) return `There is already a building called "${taken.name}".`;
+    return null;
+  }
+  const createBuilding = db.transaction((name, by = 'operator') => {
+    const error = buildingNameError(name);
+    if (error) return { error, code: 'bad_name' };
+    const id = newBuildingId();
+    db.prepare('INSERT INTO buildings (id, name, is_default) VALUES (?, ?, 0)').run(id, name.trim());
+    logAdmin(SERVER_CHANNEL, 'building.create', { actor: by, target: id, detail: `made building "${name.trim()}"` });
+    return { id, name: name.trim() };
+  });
+  const renameBuilding = db.transaction((id, name, by = 'operator') => {
+    const was = db.prepare('SELECT name FROM buildings WHERE id = ?').get(id);
+    if (!was) return { error: 'No such building.', code: 'no_building' };
+    const error = buildingNameError(name, id);
+    if (error) return { error, code: 'bad_name' };
+    if (was.name === name.trim()) return { id, name: was.name };
+    db.prepare('UPDATE buildings SET name = ? WHERE id = ?').run(name.trim(), id);
+    logAdmin(SERVER_CHANNEL, 'building.rename', { actor: by, target: id, detail: `renamed "${was.name}" to "${name.trim()}"` });
+    return { id, name: name.trim() };
+  });
+  /**
+   * Only an empty building goes, and never the default: a floor is always in
+   * a building, and deleting one with floors would have to choose where they
+   * go, which is the operator's choice to make by moving them first. An
+   * archived floor counts, since it is still the building's.
+   */
+  const deleteBuilding = db.transaction((id, by = 'operator') => {
+    const b = db.prepare('SELECT name, is_default FROM buildings WHERE id = ?').get(id);
+    if (!b) return { error: 'No such building.', code: 'no_building' };
+    if (b.is_default) return { error: `"${b.name}" is the default building, where every new floor arrives, so it cannot be deleted. Rename it instead.`, code: 'default_building' };
+    const floors = [...floorBuildings()].filter(([, bid]) => bid === id).map(([c]) => c);
+    if (floors.length) return { error: `"${b.name}" still has ${floors.length} floor${floors.length === 1 ? '' : 's'} (${floors.join(', ')}). Move them to another building first.`, code: 'building_not_empty', floors };
+    db.prepare('DELETE FROM buildings WHERE id = ?').run(id);
+    db.prepare('UPDATE channel_flags SET building_id = NULL WHERE building_id = ?').run(id);
+    logAdmin(SERVER_CHANNEL, 'building.delete', { actor: by, target: id, detail: `deleted building "${b.name}"` });
+    return { id, deleted: true };
+  });
+  const setFloorBuilding = db.transaction((channel, id, by = 'operator') => {
+    const b = db.prepare('SELECT name, is_default FROM buildings WHERE id = ?').get(id);
+    if (!b) return { error: 'No such building.', code: 'no_building' };
+    const from = floorBuildings([channel]).get(channel);
+    db.prepare(`INSERT INTO channel_flags (channel, building_id) VALUES (?, ?)
+                ON CONFLICT(channel) DO UPDATE SET building_id = excluded.building_id`).run(channel, id);
+    if (from !== id) logAdmin(channel, 'floor.building', { actor: by, target: channel, detail: `moved to building "${b.name}"` });
+    return { channel, building: id, moved: from !== id };
+  });
+  /**
+   * An operator action's audit row. Done from a page relayed through the
+   * service (src/relay.js), the actor is the person the service signed in,
+   * not the literal `operator`: the board can no longer assume whoever
+   * acted was at this machine's keyboard.
+   */
+  function logAdmin(channel, action, { actor = 'operator', target = null, detail = null } = {}) {
+    const remote = actor === 'operator' ? relayedBy() : null;
+    if (remote) actor = `${remote.name} (remote)`;
+    return n(q.insertAdminEvent.run({ channel, action, actor, target, detail }).lastInsertRowid);
+  }
+
   const purgeChannel = db.transaction((channel, by) => {
     const counts = {};
     for (const table of ['messages', 'tasks', 'contracts', 'contract_history', 'agents',
@@ -1747,6 +1895,11 @@ export function makeStore(db) {
       }
       report[table] = { removed, inserted, ...(ignored.length ? { ignored_columns: ignored } : {}) };
     }
+    // A file from before buildings leaves this table untouched; one that
+    // carries it replaces it whole. Either way there is one default after.
+    // floorBuildings makes one too at its next read, so this is the second
+    // guard: a mutant dropping it survives test:service by design.
+    ensureDefaultBuilding(db);
     return report;
   });
 
@@ -1822,6 +1975,10 @@ export function makeStore(db) {
     const hereIds = {};
     for (const t of ID_TABLES) hereIds[t] = new Map(hereOf(t).filter((r) => !(t === 'admin_events' && ownAudit(r))).map((r) => [ROW_IS[t](r), r.id]));
     const keptAudit = hereOf('admin_events').filter(ownAudit);
+    // Which building this floor is in here is this instance's: the file's id
+    // names a building on the instance it came from. Kept, so a floor brought
+    // over again stays where the operator put it.
+    const hereBuilding = db.prepare('SELECT building_id FROM channel_flags WHERE channel = ?').get(channel)?.building_id ?? null;
 
     const report = {};
     const idMaps = {};
@@ -1889,6 +2046,11 @@ export function makeStore(db) {
         }
       }
       report[t] = { removed, inserted, ...(renumbered ? { renumbered } : {}) };
+    }
+
+    if (hereBuilding) {
+      db.prepare(`INSERT INTO channel_flags (channel, building_id) VALUES (?, ?)
+                  ON CONFLICT(channel) DO UPDATE SET building_id = excluded.building_id`).run(channel, hereBuilding);
     }
 
     // Profiles are per agent: taken only for an agent with none here.
@@ -2153,8 +2315,7 @@ export function makeStore(db) {
       return true;
     },
     purgeChannel,
-    logAdmin: (channel, action, { actor = 'operator', target = null, detail = null } = {}) =>
-      n(q.insertAdminEvent.run({ channel, action, actor, target, detail }).lastInsertRowid),
+    logAdmin,
 
     // --- backup / restore -----------------------------------------------------
     dumpTable: (table) => tableInfo(table).selectAll.all(),
@@ -2182,6 +2343,16 @@ export function makeStore(db) {
       }
       return { adopted, kept };
     }),
+
+    // --- buildings --------------------------------------------------------------
+    listBuildings,
+    /** channel → building id, every floor resolved (none of its own, or an
+     *  id not here, is the default's). */
+    floorBuildings,
+    createBuilding,
+    renameBuilding,
+    deleteBuilding,
+    setFloorBuilding,
 
     // --- dashboard reads ------------------------------------------------------
     listAllAgents: () => q.listAllAgents.all(),

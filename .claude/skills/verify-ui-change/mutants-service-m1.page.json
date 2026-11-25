@@ -1,0 +1,68 @@
+[
+ [
+  "remotely, the handoffs are still drawn",
+  "src/ui/floor.js",
+  "    if (floor.viewer?.remote) {\n      toVsc.classList.add('hidden');",
+  "    if (false) {\n      toVsc.classList.add('hidden');"
+ ],
+ [
+  "the payload never says remote",
+  "src/floor.js",
+  "  return req?.relay ? { remote: true, name: req.relay.name } : { remote: false };",
+  "  return { remote: false };"
+ ],
+ [
+  "the CSRF lock compares a relayed Origin with Host",
+  "src/auth.js",
+  "    if (req.relay) return origin === req.relay.origin;",
+  ""
+ ],
+ [
+  "the audit row says operator remotely",
+  "src/db.js",
+  "    if (remote) actor = `${remote.name} (remote)`;",
+  ""
+ ],
+ [
+  "the folder dialog is served remotely",
+  "src/relay.js",
+  "  ['POST /api/floor/pick', ",
+  "  ['POST /api/floor/pick-x', "
+ ],
+ [
+  "the floor ignores the building",
+  "src/ui/app.js",
+  "function onBoard(channels, b = globalThis.buildings?.current?.() ?? null) { return (channels ?? []).filter((c) => !c.archived && inBuildingNow(c, b)); }",
+  "function onBoard(channels, b = globalThis.buildings?.current?.() ?? null) { return (channels ?? []).filter((c) => !c.archived); }"
+ ],
+ [
+  "the picker is never drawn",
+  "src/ui/app.js",
+  "  if (pick.dataset.sig !== html) { pick.dataset.sig = html; pick.innerHTML = html; }",
+  "  void html;"
+ ],
+ [
+  "the address does not keep the building",
+  "src/ui/app.js",
+  "    if (buildingWanted) q.set('building', buildingWanted); else q.delete('building');",
+  "    q.delete('building');"
+ ],
+ [
+  "the totals are the whole board's",
+  "src/ui/floor.js",
+  "    const t = (floor.buildings?.length ?? 0) > 1 ? buildingTotals(here, floor.queue) : (floor.totals ?? {});",
+  "    const t = floor.totals ?? {};"
+ ],
+ [
+  "a floor's select does nothing",
+  "src/ui/app.js",
+  "  if (fb) { buildingAct('floor/building',",
+  "  if (fb) { return; buildingAct('floor/building',"
+ ],
+ [
+  "a refusal is not said in the section",
+  "src/ui/app.js",
+  "    if (now) { now.hidden = false; now.textContent = e.message ?? String(e); }",
+  "    void now;"
+ ]
+]

@@ -97,6 +97,13 @@ export function createAuth({ env = process.env } = {}) {
     if (String(req.headers['sec-fetch-site'] ?? '') === 'cross-site') return false;
     const origin = header(req, 'origin');
     if (!origin) return true;
+    // A relayed request (src/relay.js) reached the board on loopback, so its
+    // Host is the hop's, not the page's: the public origin it was served from
+    // is in its signed identity, and that is the one to match. The relay's
+    // own check has already refused any other Origin (relay_cross_origin),
+    // so this is the second guard, and a mutant reading `true` here survives
+    // test:service by design; the mutant that drops the line does not.
+    if (req.relay) return origin === req.relay.origin;
     try { return new URL(origin).host === req.headers.host; } catch { return false; }
   }
 

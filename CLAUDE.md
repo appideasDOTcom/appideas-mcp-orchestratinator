@@ -445,6 +445,49 @@ they still describe tmux, which holds for an interactive Claude Code only.
 Other skills mention tmux in passing (verify-ui-change, capture-a-burst,
 measure-the-desktop, recover-a-lost-record).
 
+## The service round: buildings and a relayed request (2026-11-24, M1)
+
+costmo's brief that day: a paid service, for the **desktop app only** (the
+Docker app never connects to it), for agents on several computers in one
+building, and for operating your own board from a phone or
+app.orchestratinator.com. The plan, his eight decisions, the lanes and the
+milestones are the board contract `service.plan` (copy:
+[`docs/service/plan.md`](docs/service/plan.md)). The service is its own
+repo (`../orchestratinator-service`, Go, orchestratinator-service-developer),
+and the app's tunnel and hop are desktop-dev's. **coordinator is the one
+voice to costmo for the round**, and his decisions go to him by
+AskUserQuestion. Each milestone ends in a demo and a break for him, and
+nothing from the next one starts before his go.
+
+This repo's half of M1:
+- **Buildings** (`src/db.js`, `buildings`, `channel_flags.building_id`).
+  A bucket of floors and no more: a floor keeps its one name per board,
+  and nothing an agent does reads its building. Every board has one
+  default ("Main"), and a floor with no building of its own, or one
+  naming a building that isn't here, is in it. So every board from before
+  is unchanged. The page shows one building at a time: header chips once
+  there are two, `?building=` in the address, and Settings ▸ Buildings.
+  The scope is in `onBoard`/`putAway`, so every list on both views follows
+  it.
+- **A relayed request** (`src/relay.js`, contract `board.relay`, copy
+  [`docs/service/board-relay.md`](docs/service/board-relay.md)).
+  - The app's hop signs who a request is from (HMAC over a base64url
+    payload, keyed by `ORCH_RELAY_SECRET` as a string), and the board checks
+    it ahead of every route.
+  - A board with no secret refuses any relay header. It is never served as
+    local, which is why a forged header is refused rather than ignored.
+  - The CSRF lock compares the signed `origin`, since `Host` is the hop's.
+  - Audit rows name `<name> (remote)`.
+  - Five routes that open something on the board machine's own screen are
+    `409 relay_local_only`. The page leaves them out for a remote viewer
+    (`viewer` on both payloads).
+- Tested by `npm run test:service` (both halves), the page checks
+  **check-buildings.mjs** and **check-relayed.mjs** (the page served
+  through `relay-hop.mjs`, a stand-in for the app's hop, from
+  `http://<b>.localhost`), and the mutant lists
+  `mutants-service-m1.suite.json` and `mutants-service-m1.page.json`. Three
+  second guards survive by design, and their comments say so.
+
 ## Three boards, one of them ours
 
 Desks on this machine point at three different servers. **Only
@@ -3374,7 +3417,7 @@ day), and the host ran under launchd on the shell's Node 20. Now:
   measured, a real `docker build` of the round's tree loads it (SQLite
   3.53.4) on Node 24.22.2 / npm 11.19.1.
 
-`npm test` runs thirteen suites. `test:host` and `test:seats` are not unit
+`npm test` runs fourteen suites. `test:host` and `test:seats` are not unit
 tests: each runs a **real host** against a **real server**, and the host
 runs a stand-in Claude Code for each desk (`ORCH_HOST_CLAUDE`) that speaks
 stream-JSON the way 2.1.330 was measured to and writes what Claude Code
@@ -3767,6 +3810,7 @@ operator's live floor.
   | `src/uploads.js` | `test:floor`, and `test:host`, whose board runs it |
   | `host/uploads.js` | `test:host`, and `test:floor`, which reads its header |
   | `host/install.sh`, `host/node.sh`, `host/run.sh` | `test:host` (its install rows, on stand-ins) |
+  | `src/relay.js`, buildings in `src/db.js` / `src/web.js` | `test:service`, and **check-relayed.mjs** / **check-buildings.mjs** for the page |
   | `scripts/set-version.mjs`, `scripts/check-lock.mjs` | `smoke` |
   | `Dockerfile`, `package.json`'s dependencies, `package-lock.json` | no suite: a real `docker build` in a scratch tag, `npm ls` inside it against the lock, and `node -v` against the gate's |
   | `scripts/release-gate.sh`, `scripts/coverage/` | themselves: a seeded red in a copy for the gate; for coverage, `report.mjs` over a known set of snapshots |

@@ -4,7 +4,7 @@ import { SERVER_CHANNEL } from './auth.js';
 import {
   applyBackup, applyFloor, backupFilename, buildBackup, floorsIn, snapshotBeforeRestore, validateBackup,
 } from './backup.js';
-import { createFloorRouter, deliverable, nudgeable } from './floor.js';
+import { createFloorRouter, deliverable, nudgeable, viewerOf } from './floor.js';
 // The same derivation the store uses, so a row for an agent with no persona row
 // yet shows the name it is about to be given rather than a raw id for one poll.
 import { humanName } from './db.js';
@@ -79,6 +79,7 @@ function buildState(store, sessions, sessionStats, meta) {
     store.listChannelFlags().filter((f) => f.archived_at).map((f) => [f.channel, f.archived_at])
   );
   const tasksByChannel = index(store.boardTasks(), (t) => t.channel);
+  const buildingOf = store.floorBuildings();
 
 
   // Channels known to the database, plus any a live session claims but that has
@@ -172,6 +173,7 @@ function buildState(store, sessions, sessionStats, meta) {
       personas,
       archived: archivedAt.has(channel),
       archived_at: iso(archivedAt.get(channel)),
+      building: buildingOf.get(channel) ?? null,
       connected: agents.filter((a) => a.presence === 'connected').length,
       agents,
       retired_agents: retiredAgents,
@@ -215,6 +217,7 @@ function buildState(store, sessions, sessionStats, meta) {
       now: new Date(nowMs).toISOString(),
     },
     sessions: liveSessions.sort((a, b) => (a.channel ?? '').localeCompare(b.channel ?? '')),
+    buildings: store.listBuildings(),
     // The colours a picker may offer, sent rather than hard-coded in the page:
     // the endpoint validates against this same list, so a swatch that appears
     // is a swatch that will save. Static and small — a few hundred bytes on a
@@ -401,6 +404,35 @@ function createAdminRouter({ store, auth, closeSessionsFor, meta }) {
       res.json({ ok: true, channel, agent, hidden });
     });
   }
+
+  /* ---------- buildings (the service round, 2026-11-24) ---------- */
+
+  // A bucket of floors (src/db.js, `buildings`). Each refusal is the store's
+  // sentence, said as it is: a 409 for a building that cannot go yet, a 400
+  // for a name, a 404 for an id this board does not have.
+  const buildingAnswer = (res, r) => {
+    if (!r.error) return res.json({ ok: true, ...r });
+    const status = r.code === 'no_building' ? 404 : r.code === 'bad_name' ? 400 : 409;
+    return res.status(status).json({ error: r.error, code: r.code, ...(r.floors ? { floors: r.floors } : {}) });
+  };
+  router.post('/building/create', (req, res) => buildingAnswer(res, store.createBuilding(req.body?.name)));
+  router.post('/building/rename', (req, res) => {
+    const id = str(req.body?.id);
+    if (!id) return bad(res, 'id is required');
+    return buildingAnswer(res, store.renameBuilding(id, req.body?.name));
+  });
+  router.post('/building/delete', (req, res) => {
+    const id = str(req.body?.id);
+    if (!id) return bad(res, 'id is required');
+    return buildingAnswer(res, store.deleteBuilding(id));
+  });
+  router.post('/floor/building', (req, res) => {
+    const channel = str(req.body?.channel);
+    const id = str(req.body?.building);
+    if (!channel || !id) return bad(res, 'channel and building are required');
+    if (!store.listAllChannels().includes(channel)) return missing(res, `no floor "${channel}" on this board`);
+    return buildingAnswer(res, store.setFloorBuilding(channel, id));
+  });
 
   /**
    * Permanent, unrecoverable deletion of everything on a channel. Guarded by
@@ -648,8 +680,9 @@ export function createWebRouter({ store, sessions, sessionStats, meta, auth, clo
   // ahead of the static handler so /api/floor never falls through to index.html.
   router.use(createFloorRouter({ store, auth, sessions, updates, uploads, protocol: meta.protocol, version: meta.version }));
 
-  router.get('/api/state', (_req, res) => {
+  router.get('/api/state', (req, res) => {
     const state = buildState(store, sessions, sessionStats, meta);
+    state.viewer = viewerOf(req);
     // The header's Update button and the settings' Updates section read this.
     if (updates) state.update = updates.view();
     res.json(state);
@@ -659,6 +692,18 @@ export function createWebRouter({ store, sessions, sessionStats, meta, auth, clo
   // one, which is rarely, and /api/state is polled every two seconds by both
   // surfaces. The picker fetches this when it opens and after the manager
   // changes something — the two moments the answer can actually differ.
+  // What the desktop app registers with the service (contract board.relay,
+  // "routes added"): each building's opaque id, its name, and its floors.
+  router.get('/api/buildings', (_req, res) => {
+    const at = store.floorBuildings();
+    res.json({
+      buildings: store.listBuildings().map((b) => ({
+        ...b,
+        floors: [...at].filter(([, id]) => id === b.id).map(([c]) => c),
+      })),
+    });
+  });
+
   router.get('/api/prompts', (_req, res) => {
     res.json({ prompts: store.listSavedPrompts() });
   });

@@ -3105,7 +3105,18 @@ function applyHostEvent(store, live, hostId, ev) {
  * seat — the alternative, waiting for it to also appear on the board, would show
  * an empty room to somebody whose windows are plainly open.
  */
+/**
+ * Who is looking (contract board.relay): a page relayed through the desktop
+ * app's tunnel is `remote`, and the page leaves out what would open on the
+ * board machine's own screen (relay_local_only) rather than offer a button
+ * the board refuses. Everything else is the same page.
+ */
+export function viewerOf(req) {
+  return req?.relay ? { remote: true, name: req.relay.name } : { remote: false };
+}
+
 export function buildFloor(store, live = null, sessions = null) {
+  const buildingOf = store.floorBuildings?.() ?? new Map();
   const nowMs = Date.now();
   const key = deskKey;
 
@@ -3535,6 +3546,9 @@ export function buildFloor(store, live = null, sessions = null) {
       // Hidden from the building, still reachable by name. The page decides
       // what that means; this only says which channels it is true of.
       archived: shelved,
+      // Which building the floor is in (src/db.js, `buildings`), so the page
+      // can show one building's floors and the board's rows alike.
+      building: buildingOf.get(channel) ?? null,
       desks,
       live: desks.filter((d) => d.live).length,
       awaiting: desks.filter((d) => d.live && (d.session?.awaiting_kind || d.permission?.startup)).length,
@@ -3589,6 +3603,7 @@ export function buildFloor(store, live = null, sessions = null) {
   return {
     now: new Date(nowMs).toISOString(),
     channels,
+    buildings: store.listBuildings?.() ?? [],
     queue,
     hosts,
     cast: CAST,
@@ -4081,9 +4096,9 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     }
   };
 
-  router.get('/api/floor', (_req, res) => {
+  router.get('/api/floor', (req, res) => {
     sweep();
-    res.json(buildFloor(store, live, sessions));
+    res.json({ ...buildFloor(store, live, sessions), viewer: viewerOf(req) });
   });
 
   /**
@@ -4479,6 +4494,13 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     const folder = fromPicker ?? offered?.folders.find((f) => f.path === path) ?? null;
     if (!folder) {
       return res.status(409).json({ error: `That folder is not one ${hostRow.name} has shown. Open it in the picker first.`, code: 'unknown_folder' });
+    }
+    // A new floor is made in the building the page was showing (`building`,
+    // sent only for a floor typed new). A floor that already exists stays in
+    // the building it is in: a take is not a move between buildings.
+    const building = str(req.body?.building);
+    if (building && !store.listAllChannels().includes(channel) && store.listBuildings().some((b) => b.id === building)) {
+      store.setFloorBuilding(channel, building);
     }
     // `seat`: "New desk here" — a second desk for the folder's agent, on this
     // floor, with a session of its own; the folder's own desk is left as it is.
