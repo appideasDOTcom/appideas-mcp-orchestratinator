@@ -162,7 +162,15 @@ export function createScope({ store }) {
     const what = `${req.method} ${req.path}`;
     const me = requester(req);
     const guest = req.relay?.role === 'guest';
-    const refuse = (status, code, error) => res.status(status).json({ error, code });
+    // On /mcp a refusal is 503, never 401 or 403 (desktop-dev's M3 walk,
+    // measured on Claude Code 2.1.331): Claude Code remembers a 401/403 on
+    // an MCP server as "needs authentication" under the server's NAME, and
+    // every desk's binding is called orchestratinator, so one refused desk
+    // left every desk on that computer unable to reach its board, its own
+    // included. A 503 is read as "failed" and not remembered. The body says
+    // why, as for any other route.
+    const onMcp = /^\/mcp(\/|$)/.test(req.path);
+    const refuse = (status, code, error) => res.status(onMcp && (status === 401 || status === 403) ? 503 : status).json({ error, code });
     if (guest) {
       if (GUEST_DENY.some((rx) => rx.test(req.path))) return refuse(403, 'relay_guest_scope', `A guest of this board does not reach ${req.path}: it is the board owner's.`);
       if (HOST_ID_ROUTES.test(req.path)) {

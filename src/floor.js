@@ -4356,6 +4356,10 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
       // waiting on would keep it live for ever). Behind the retire, so a
       // mutant dropping this line survives test:service by design.
       store.endDeskSessions(d.channel, d.agent);
+      // The name is free again: the desk has left the floor, and a desk
+      // name kept by an operator who can no longer come in blocked anyone
+      // else from taking it (desktop-dev's M3 walk, finding b).
+      store.clearDeskOperator?.(d.channel, d.agent);
       live.publish(k, { type: 'state', state: 'offline' });
       dropped.push({ channel: d.channel, agent: d.agent });
     }
@@ -4776,6 +4780,18 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
       return res.status(400).json({ error: 'host_id, path, channel and agent are required' });
     }
     if (!NAME_RE.test(agent) || !floorNameOk(channel)) return res.status(400).json({ error: NAME_WHY, code: 'bad_name' });
+    // A desk name another operator holds is theirs (board.relay v5): refused
+    // here, in words, rather than accepted and then left unfiled when the
+    // host registers it (desktop-dev's M3 walk, finding b: a 200 "release"
+    // and then desk_not_yours on the agent).
+    {
+      const held = store.deskOperator?.(channel, agent);
+      const mineNow = (held?.op ?? null) === requesterOp(req);
+      if (held && !mineNow) {
+        const whose = held.op ? (held.name ?? 'a guest') : (store.ownerName?.() ?? 'the board owner');
+        return res.status(403).json({ error: `${agent} on ${channel} is ${whose}'s desk. Take it under another name.`, code: 'desk_not_yours' });
+      }
+    }
     let persona = null;
     if (req.body?.persona !== undefined && str(req.body.persona)) {
       persona = str(req.body.persona);

@@ -389,6 +389,10 @@ try {
     eq(await act('/api/floor/pick', { host_id: 'op_g~mac' }), 'host_not_yours', 'nor open its folder dialog');
     eq(await act('/api/floor/read', { channel: 'open-floor', agent: 'gdev', session_id: 's' }), 'desk_not_yours', 'nor read the guest\'s agent\'s conversation off its disk');
     eq(await act('/api/floor/browse', { host_id: 'h-own', path: '/o' }, guest()), 'relay_host_id', 'and the guest not the owner\'s host');
+    // A name another operator holds is refused at the take, in words, not
+    // taken and then silently left unfiled (desktop-dev's M3 walk, b).
+    const takeName = await json(await fetch(`${B}/api/floor/desk`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ host_id: 'h-own', path: '/o/x', channel: 'open-floor', agent: 'gdev' }) }));
+    assert(takeName.status === 403 && takeName.body.code === 'desk_not_yours' && /gdev on open-floor is Gail's desk/.test(takeName.body.error), 'taking a desk under a name the guest holds is refused, naming whose it is', JSON.stringify(takeName.body));
     const folders = async (p) => (await (await fetch(`${B}/api/floor/folders`, { headers: p ? hdr(p) : {} })).json()).hosts.map((h) => h.host_id).sort();
     eq(await folders(), ['h-own'], 'the owner\'s folder lists are its own hosts\'');
     eq(await folders(guest()), ['op_g~mac'], 'the guest\'s are its own');
@@ -422,6 +426,11 @@ try {
     const mcp = async (ch, ag, p) => (await json(await fetch(`${B}/mcp`, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...sign(p), 'x-orchestratinator-key': KEY, 'x-channel': ch, 'x-agent': ag }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 't', version: '1' } } }) }))).body?.code;
     eq(await mcp('private', 'gx', guest()), 'relay_guest_scope', 'a guest\'s agent on a floor outside its card: refused');
     eq(await mcp('open-floor', 'odev', guest()), 'desk_not_yours', 'a guest\'s agent claiming the owner\'s desk: refused');
+    // 503, not 403: Claude Code caches a 401/403 on an MCP server as "needs
+    // authentication" under its name, which every desk shares (the M3 walk).
+    const st = (await fetch(`${B}/mcp`, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...sign(guest()), 'x-orchestratinator-key': KEY, 'x-channel': 'open-floor', 'x-agent': 'odev' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 't', version: '1' } } }) })).status;
+    eq(st, 503, 'and the refusal on /mcp is a 503, which Claude Code does not remember as an auth failure for every desk');
+    eq((await fetch(`${B}/api/floor/interrupt`, { method: 'POST', headers: { 'content-type': 'application/json', ...hdr(guest()) }, body: JSON.stringify({ channel: 'open-floor', agent: 'odev' }) })).status, 403, 'off /mcp, the same refusal stays a 403');
     assert(!['desk_not_yours', 'relay_guest_scope'].includes(await mcp('open-floor', 'gdev', guest())), 'its own desk, on its own floor: let through');
     const fresh = await mcp('open-floor', 'newcomer', guest());
     assert(!['desk_not_yours', 'relay_guest_scope'].includes(fresh), `a name no desk holds, on its floor: let through (${fresh})`);
@@ -515,8 +524,8 @@ try {
     const gone = await access({ op: 'op_g', buildings: [] }, owner());
     eq([gone.status, gone.body.dropped.map((d) => d.agent).sort(), gone.body.hosts_offline], [200, ['gdev', 'ghost', 'newcomer'], ['op_g~mac']], 'no card left: its desks leave the floor (the hosted one, and those it was known by with no host) and its host goes offline');
     eq((await ghostLive())?.live ?? false, false, 'ghost no longer reads live: its sessions are ended');
-    const own = (await json(await post(B, '/api/floor/interrupt', { channel: 'open-floor', agent: 'ghost' }))).body?.code;
-    eq(own, 'desk_not_yours', 'and it is still known as the guest\'s, so the owner does not take it over');
+    const own = await json(await fetch(`${B}/api/floor/desk`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ host_id: 'h-own', path: '/o/ghost', channel: 'open-floor', agent: 'ghost' }) }));
+    assert(own.body?.code !== 'desk_not_yours', 'and its name is free again: a take of it is no longer refused as the guest\'s (the M3 walk, b)', JSON.stringify(own.body));
     const f = await (await fetch(`${B}/api/floor`)).json();
     eq(f.channels.find((c) => c.channel === 'open-floor').desks.find((d) => d.agent === 'gdev')?.hosted ?? null, null, 'the owner\'s floor no longer shows the guest\'s desk as hosted');
     const gd = f.channels.find((c) => c.channel === 'open-floor').desks.find((d) => d.agent === 'gdev');

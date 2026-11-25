@@ -2400,6 +2400,7 @@ export function makeStore(db) {
     },
     setDeskOperator: (channel, agent, op, name) => db.prepare(`INSERT INTO desk_operators (channel, agent, operator, name) VALUES (?, ?, ?, ?)
       ON CONFLICT(channel, agent) DO UPDATE SET operator = excluded.operator, name = excluded.name, updated_at = datetime('now')`).run(channel, agent, op, name ?? null).changes,
+    clearDeskOperator: (channel, agent) => db.prepare('DELETE FROM desk_operators WHERE channel = ? AND agent = ?').run(channel, agent).changes,
     desksOfOperator: (op) => db.prepare('SELECT channel, agent FROM desk_operators WHERE operator = ?').all(op),
     /** A host whose operator's access ended (POST /api/relay/access): unheard from as of now, so it reads offline at once, not after the liveness window. Its next registration, if its access returns, brings it back. */
     retireHost: (hostId) => db.prepare("UPDATE hosts SET last_seen = datetime('now', '-1 day') WHERE host_id = ?").run(hostId).changes,
