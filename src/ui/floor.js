@@ -1289,6 +1289,11 @@
       const i = s.startsWith(`${h}\n`) ? 0 : s.lastIndexOf(`\n\n${h}\n`);
       if (i > at) { at = i; header = h; }
     }
+    // And a list another agent's send_file attached (board.files): "Attached
+    // by qa:", the agent's name in place of "the operator".
+    for (const m of s.matchAll(/(^|\n\n)(Attached by [^\n:]{1,80}:)\n/g)) {
+      if (m.index > at) { at = m.index; header = m[2]; }
+    }
     if (at < 0) return { text: s, files: [] };
     const listAt = at === 0 ? 0 : at + 2;
     const lines = s.slice(listAt + header.length + 1).replace(/\n+$/, '').split('\n');

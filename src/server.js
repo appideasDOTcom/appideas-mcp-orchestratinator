@@ -13,6 +13,7 @@ import { createRelay, createScope } from './relay.js';
 import { buildCommit } from './build-info.js';
 import { createUpdates } from './updates.js';
 import { createUploads } from './uploads.js';
+import { createFiles } from './files.js';
 import { HOST_STALE_SECONDS } from './floor.js';
 
 // Pick up ./.env for bare `npm start` runs. Under Docker the values arrive
@@ -117,13 +118,17 @@ const jsonRestore = express.json({ limit: process.env.RESTORE_BODY_LIMIT ?? '128
 // route after adminGuard has run, so no parser may touch it: a .json file sent
 // as application/json would otherwise be parsed here, against the 4mb limit.
 const UPLOAD_PATH = '/api/floor/upload';
+// And a file an agent sends (board.files): its bytes, from the sender's host.
+const HOST_FILE_PATH = '/api/host/file';
+// The broker between the send_file tool and the floor's routes (src/files.js).
+const files = createFiles();
 // The routes that take a whole backup file: a restore, one floor of it, and
 // the read of which floors it holds (the page posts the file to ask). A real
 // board's file is 14 MB (2026-11-19), so each needs the restore's headroom;
 // the one-floor routes were refused at 4mb by the first real file.
 const RESTORE_PATHS = new Set(['/api/admin/backup/restore', '/api/admin/backup/restore-floor', '/api/admin/backup/floors']);
 app.use((req, res, next) => {
-  if (req.path === UPLOAD_PATH) return next();
+  if (req.path === UPLOAD_PATH || req.path === HOST_FILE_PATH) return next();
   return (RESTORE_PATHS.has(req.path) ? jsonRestore : jsonBody)(req, res, next);
 });
 // Who may do what, now that a body names its floor and desk (board.relay
@@ -382,7 +387,7 @@ app.post('/mcp', async (req, res) => {
     };
 
     const server = new McpServer({ name: NAME, version: VERSION });
-    registerTools(server, { store, context });
+    registerTools(server, { store, context, files });
     await server.connect(transport);
   }
 
@@ -447,6 +452,7 @@ app.use(createWebRouter({
   sessions,
   updates,
   uploads,
+  files,
   sessionStats,
   auth,
   closeSessionsFor,

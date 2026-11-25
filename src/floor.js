@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { hostname } from 'node:os';
 import { requesterOp } from './relay.js';
 import express from 'express';
@@ -3698,7 +3699,7 @@ export function buildFloor(store, live = null, sessions = null) {
   };
 }
 
-export function createFloorRouter({ store, auth, sessions = null, updates = null, protocol = null, version = null, uploads = null, closeSessionsFor = null }) {
+export function createFloorRouter({ store, auth, sessions = null, updates = null, protocol = null, version = null, uploads = null, closeSessionsFor = null, files = null }) {
   const router = express.Router();
   const hostMayHold = (guest, hostId, channel, agent) => {
     if (guest && !guestFloors(store, guest, [channel]).has(channel)) return false;
@@ -3805,6 +3806,7 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     store.registerHost(hostId, name, str(req.body?.tmux), req.body?.seats === true, req.body?.uploads === true, req.body?.reconnect === true,
       { signins: req.body?.signin === true, signedOut: req.body?.signed_out === true });
     store.setHostOperator?.(hostId, hostGuest?.op ?? null, hostGuest?.name ?? null);
+    store.setHostFiles?.(hostId, req.body?.files === true);
     // Its build, its clone and the board container it found beside it: which
     // host can update this board, and whether it would be refused (issue #40).
     live.updates?.noteHost(hostId, req.body);
@@ -4080,6 +4082,101 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     res.sendFile(f.path, { dotfiles: 'allow' }, (err) => {
       if (err && !res.headersSent) res.status(500).json({ error: 'could not read the upload' });
     });
+  });
+
+  /* ---------- a file one agent sends another (contract board.files) ---------- */
+
+  // Transfers waiting on the sender's host: id → { sender, to, host, recvHost, note, done, timer }.
+  const transfers = new Map();
+  const fmtSize = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : n >= 1024 ? `${Math.round(n / 1024)} KB` : `${n} bytes`);
+
+  /** The tool's half: check both desks, ask the sender's host, wait for it. */
+  files?.attach({
+    send: ({ channel, agent, to, path, note }, waitMs) => {
+      const no = (code, error) => ({ sent: false, code, error });
+      if (!uploads) return no('no_board', 'This board takes no files.');
+      const from = store.hostedDesk(channel, agent);
+      if (!from) return no('no_host', `No host runs your desk (${agent}), so nothing on your computer can read the file for the board.`);
+      if (!store.hostTakesFiles?.(from.host_id)) return no('host_no_files', `${from.host_name ?? 'Your host'} runs a build from before files could be sent. Update it to send files.`);
+      if (!to || to === agent) return no('no_recipient', 'Name another agent on your floor to send the file to.');
+      const there = store.hostedDesk(channel, to);
+      if (!there && !store.listAllAgents().some((a) => a.channel === channel && a.agent === to)) return no('no_recipient', `There is no agent called ${to} on ${channel}.`);
+      const reach = deliverable(there);
+      if (reach.error) return no('recipient_offline', `${to} cannot take a file right now: ${reach.error}`);
+      const transfer = `ft_${randomBytes(9).toString('hex')}`;
+      return new Promise((resolve) => {
+        const t = { sender: { channel, agent }, to, host: from.host_id, recvHost: there.host_id, note, resolve };
+        t.timer = setTimeout(() => { transfers.delete(transfer); resolve(no('host_slow', `Your host did not send the file within ${Math.round(waitMs / 1000)} s, so nothing reached ${to}.`)); }, waitMs);
+        t.timer.unref?.();
+        transfers.set(transfer, t);
+        store.enqueueHostWork(from.host_id, channel, agent, 'send_file', { transfer, path, cwd: from.cwd });
+        live.wake(from.host_id);
+      });
+    },
+  });
+  const settle = (transfer, result) => {
+    const t = transfers.get(transfer);
+    if (!t) return null;
+    transfers.delete(transfer);
+    clearTimeout(t.timer);
+    t.resolve(result);
+    return t;
+  };
+
+  /**
+   * The file's bytes, from the sender's host: staged as an operator's
+   * attachment is, then sent to the receiver as a message carrying it,
+   * attributed to the agent that sent it. Only for a transfer this board
+   * made, and only from the host it asked.
+   */
+  router.post('/api/host/file', auth.ingestGuard, async (req, res) => {
+    const hostId = str(req.query.host_id);
+    const transfer = str(req.query.transfer);
+    const t = transfer ? transfers.get(transfer) : null;
+    if (!hostId || !t || t.host !== hostId) {
+      req.resume();
+      return res.status(404).json({ error: 'No file is being sent under that transfer from this host.', code: 'no_transfer' });
+    }
+    store.touchHost(hostId);
+    const declared = Number(req.headers['content-length']);
+    if (Number.isFinite(declared) && declared > uploads.maxBytes) {
+      res.set('connection', 'close');
+      settle(transfer, { sent: false, code: 'file', error: `The file is larger than ${Math.round(uploads.maxBytes / 1048576)} MB, the most one send can carry.` });
+      return res.status(413).json({ error: 'too large', code: 'too_large' });
+    }
+    const name = typeof req.query.name === 'string' ? req.query.name : '';
+    const r = await uploads.stage(req, { name, type: 'application/octet-stream' });
+    if (r.error) {
+      if (r.status === 413) res.set('connection', 'close');
+      settle(transfer, { sent: false, code: 'file', error: r.code === 'too_large' ? `The file is larger than ${Math.round(uploads.maxBytes / 1048576)} MB, the most one send can carry.` : r.error });
+      return res.status(r.status).json({ error: r.error, code: r.code });
+    }
+    const file = r.file;
+    uploads.grant([file.id], t.recvHost);
+    // From the sending agent, named as a message from another desk is (the
+    // sender's operator too, when it is not the receiver's).
+    const sendOp = store.deskOperator(t.sender.channel, t.sender.agent);
+    const recvOp = store.deskOperator(t.sender.channel, t.to);
+    const opWord = (sendOp?.op ?? null) !== (recvOp?.op ?? null) ? ` (${sendOp?.op ? (sendOp.name ?? 'a guest') : (store.ownerName?.() ?? 'the board owner')}'s agent)` : '';
+    // The board's own "From <name>:" line (attributedText), so the floor
+    // draws the sending agent as the speaker (fromOf), then the file.
+    const text = `From ${t.sender.agent}${opWord}:\n\nA file: ${file.name} (${fmtSize(file.size)}).${t.note ? `\n\n${t.note}` : ''}`;
+    store.enqueueHostWork(t.recvHost, t.sender.channel, t.to, 'chat', { text, files: [{ id: file.id, name: file.name, size: file.size }], attached_by: t.sender.agent });
+    live.wake(t.recvHost);
+    uploads.sweep();
+    settle(transfer, { sent: true, to: t.to, name: file.name, size: file.size, transfer });
+    res.json({ ok: true, id: file.id });
+  });
+
+  /** The sender's host could not send it: its words go back to the agent that asked. */
+  router.post('/api/host/file/fail', auth.ingestGuard, (req, res) => {
+    const hostId = str(req.body?.host_id);
+    const transfer = str(req.body?.transfer);
+    const t = transfer ? transfers.get(transfer) : null;
+    if (!hostId || !t || t.host !== hostId) return res.status(404).json({ error: 'No file is being sent under that transfer from this host.', code: 'no_transfer' });
+    const message = String(req.body?.message ?? '').slice(0, 300) || 'the file could not be read';
+    settle(transfer, { sent: false, code: 'file', error: `Your host could not send it: ${message}. Nothing reached ${t.to}.` });
+    res.json({ ok: true });
   });
 
   /** What a host's desks are doing. A batch, because a streaming reply would

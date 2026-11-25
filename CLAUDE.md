@@ -506,6 +506,16 @@ This repo's half of M1:
     folder bound to the guest's own board). A second session for such a
     folder is not built: the board refuses a seat for an `other_board`
     folder.
+- **M3, an agent sends another a file** (contract board.files; costmo's
+  decision 21; [`docs/service/board-files.md`](docs/service/board-files.md)).
+  - The `send_file` board tool takes no channel or agent: the sender is
+    always the connection's own desk.
+  - The sender's own host reads the file (`host/uploads.js` sendFile) and
+    streams it to `POST /api/host/file`, which takes bytes only from the
+    host the board asked, for the transfer it made.
+  - The board then sends it to the receiver as an attachment, "From
+    <sender>:", listed as "Attached by <sender>:".
+  - A host says it can do this with `files: true` at registration.
 - Tested by `npm run test:service` (both halves), the page checks
   **check-buildings.mjs**, **check-relayed.mjs** (the page served through
   `relay-hop.mjs`, a stand-in for the app's hop, from
@@ -3836,7 +3846,7 @@ operator's live floor.
   | `src/uploads.js` | `test:floor`, and `test:host`, whose board runs it |
   | `host/uploads.js` | `test:host`, and `test:floor`, which reads its header |
   | `host/install.sh`, `host/node.sh`, `host/run.sh` | `test:host` (its install rows, on stand-ins) |
-  | `src/relay.js`, buildings in `src/db.js` / `src/web.js` | `test:service`, and **check-relayed.mjs** / **check-buildings.mjs** for the page |
+  | `src/relay.js`, `src/files.js`, buildings in `src/db.js` / `src/web.js` | `test:service`, and **check-relayed.mjs** / **check-buildings.mjs** / **check-guest.mjs** for the page |
   | `scripts/set-version.mjs`, `scripts/check-lock.mjs` | `smoke` |
   | `Dockerfile`, `package.json`'s dependencies, `package-lock.json` | no suite: a real `docker build` in a scratch tag, `npm ls` inside it against the lock, and `node -v` against the gate's |
   | `scripts/release-gate.sh`, `scripts/coverage/` | themselves: a seeded red in a copy for the gate; for coverage, `report.mjs` over a known set of snapshots |

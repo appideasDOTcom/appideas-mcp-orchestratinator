@@ -1,0 +1,12 @@
+[
+ ["files: the host's own refusal not said", "service", "host/uploads.js", "  if (st.isDirectory()) return fail(`${raw} is a folder; send one file`);", "  if (false) return fail(`${raw} is a folder; send one file`);"],
+ ["files: a relative path read from the home folder", "service", "host/uploads.js", "  const full = isAbsolute(raw) ? raw : resolve(cwd || homedir(), raw);", "  const full = isAbsolute(raw) ? raw : resolve(homedir(), raw);"],
+ ["files: any host may send a transfer's bytes", "service", "src/floor.js", "    if (!hostId || !t || t.host !== hostId) {\n      req.resume();", "    if (!hostId || !t) {\n      req.resume();"],
+ ["files: no capability check", "service", "src/floor.js", "      if (!store.hostTakesFiles?.(from.host_id)) return no('host_no_files',", "      if (false) return no('host_no_files',"],
+ ["files: sent to oneself", "service", "src/floor.js", "      if (!to || to === agent) return no('no_recipient',", "      if (!to) return no('no_recipient',"],
+ ["files: the receiver's host never granted", "service", "src/floor.js", "    uploads.grant([file.id], t.recvHost);\n", ""],
+ ["files: attached by the operator", "service", "src/floor.js", "files: [{ id: file.id, name: file.name, size: file.size }], attached_by: t.sender.agent });", "files: [{ id: file.id, name: file.name, size: file.size }] });"],
+ ["files: no sender line", "service", "src/floor.js", "    const text = `From ${t.sender.agent}${opWord}:\\n\\nA file:", "    const text = `A file:"],
+ ["files: the header ignores by", "service", "host/uploads.js", "  const list = [who ? `Attached by ${who}:` : ATTACHED_HEADER,", "  const list = [ATTACHED_HEADER,"],
+ ["files: a host failure not passed to the agent", "service", "src/floor.js", "    settle(transfer, { sent: false, code: 'file', error: `Your host could not send it: ${message}. Nothing reached ${t.to}.` });", "    void message;"]
+]

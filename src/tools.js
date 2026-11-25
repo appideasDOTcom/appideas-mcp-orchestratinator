@@ -50,7 +50,7 @@ export function addressed(store, channel, sender, name) {
  * Register every coordination tool on a per-session McpServer instance.
  * `context` carries the channel/agent this connection is bound to.
  */
-export function registerTools(server, { store, context }) {
+export function registerTools(server, { store, context, files = null }) {
   // Presence is best-effort: recording who called what powers the dashboard's
   // "last-known state", but must never fail a real tool call.
   const touch = (channel, agent, action) => {
@@ -310,6 +310,30 @@ export function registerTools(server, { store, context }) {
       touch(channel, agent, 'complete_task');
       const changed = store.completeTask(channel, args.id, args.note ?? null, agent);
       return ok({ completed: changed > 0, id: args.id, by: agent, ...(changed ? {} : { note: 'Task not found or already done.' }) });
+    }
+  );
+
+  /*
+   * A file to another agent (contract board.files; costmo's decision 21).
+   * Who sends is the connection's own desk, never an argument: the sender's
+   * host reads the file for it, and a channel or agent override would let a
+   * caller have another desk's host read a file. So this tool takes neither.
+   */
+  if (files) server.tool(
+    'send_file',
+    'Send a file from your computer to another agent on your floor, whichever computer it runs on. Your host reads the file and the board passes it on; the other agent receives it as a message naming where the file is on its computer. One file, up to 100 MB. Use it instead of pasting a file\'s contents into a message.',
+    {
+      to: z.string().min(1).max(64).describe('The receiving agent\'s name on your floor.'),
+      path: z.string().min(1).max(4096).describe('The file on your computer: an absolute path, or one relative to your folder.'),
+      note: z.string().max(2000).optional().describe('Words to send with the file: what it is and what you want done with it.'),
+    },
+    async (args) => {
+      const channel = context.channel;
+      const agent = context.agent;
+      if (!channel || !agent) return ok({ sent: false, code: 'no_desk', error: 'This connection names no channel and agent, so there is no desk to send from.' });
+      touch(channel, agent, 'send_file');
+      const to = addressed(store, channel, agent, String(args.to).trim());
+      return ok(await files.send({ channel, agent, to, path: String(args.path), note: args.note?.trim() || null }));
     }
   );
 }

@@ -576,6 +576,9 @@ export function openDb(path) {
   // one registered through the relay as a guest. A desk belongs to its host's
   // operator, and only that operator answers its prompts or moves it.
   addColumn(db, 'hosts', 'operator', 'TEXT');
+  // It reads and sends a file for its own desk's send_file (board.files). Said
+  // at every registration; a host from before says nothing and is not asked.
+  addColumn(db, 'hosts', 'files', 'INTEGER NOT NULL DEFAULT 0');
   addColumn(db, 'hosts', 'operator_name', 'TEXT');
   ensureDefaultBuilding(db);
   // The default was "Main" for the first day (4bdd410), and costmo named it
@@ -2400,6 +2403,8 @@ export function makeStore(db) {
     desksOfOperator: (op) => db.prepare('SELECT channel, agent FROM desk_operators WHERE operator = ?').all(op),
     /** A host whose operator's access ended (POST /api/relay/access): unheard from as of now, so it reads offline at once, not after the liveness window. Its next registration, if its access returns, brings it back. */
     retireHost: (hostId) => db.prepare("UPDATE hosts SET last_seen = datetime('now', '-1 day') WHERE host_id = ?").run(hostId).changes,
+    setHostFiles: (hostId, yes) => db.prepare('UPDATE hosts SET files = ? WHERE host_id = ?').run(yes ? 1 : 0, hostId).changes,
+    hostTakesFiles: (hostId) => db.prepare('SELECT files FROM hosts WHERE host_id = ?').get(hostId)?.files === 1,
     hostOperator: (hostId) => {
       const r = db.prepare('SELECT operator, operator_name FROM hosts WHERE host_id = ?').get(hostId);
       return { op: r?.operator ?? null, name: r?.operator_name ?? null };

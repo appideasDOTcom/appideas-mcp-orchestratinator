@@ -463,7 +463,7 @@ class Host {
         // asks only a host that says so; an older one would ignore the work.
         // `uploads`: it fetches a message's attachments (host/uploads.js); a
         // board refuses files to a host that does not say so.
-        method: 'POST', body: { host_id: this.cfg.hostId, name: this.cfg.name, desks, tmux: null, roots, folders, dialog: D.hasDialog(), release: true, seats: true, uploads: true, reconnect: true, signin: true, signed_out: this.signedOut(), boot: this.boot, claude_version: this.claudeVersion ?? null, canary: this.canary ?? null, ...me },
+        method: 'POST', body: { host_id: this.cfg.hostId, name: this.cfg.name, desks, tmux: null, roots, folders, dialog: D.hasDialog(), release: true, seats: true, uploads: true, files: true, reconnect: true, signin: true, signed_out: this.signedOut(), boot: this.boot, claude_version: this.claudeVersion ?? null, canary: this.canary ?? null, ...me },
       });
     } catch (err) {
       // The board refusing this host for its protocol (protocolRefusal in
@@ -1553,6 +1553,17 @@ class Host {
       }
     }
     switch (item.kind) {
+      case 'send_file': {
+        // Its own desk's agent asked to send a file (board.files): read it
+        // here, on this computer, and stream it to the board, which passes it
+        // on. Awaited on this line like an attachment's fetch: a file is a
+        // read and one request. A file it cannot send is said to the board,
+        // which tells the agent that asked.
+        const r = await UP.sendFile({ url: this.cfg.url, token: this.cfg.token, hostId: this.cfg.hostId, transfer: String(item.payload?.transfer ?? ''), path: item.payload?.path, cwd: desk.cwd ?? item.payload?.cwd ?? null });
+        if (r.error) warn(`${desk.label}: a file was not sent — ${r.error}`);
+        else log(`${desk.label}: sent ${r.name} (${r.size} bytes) to the board`);
+        break;
+      }
       case 'chat': {
         let text = typeof item.payload?.text === 'string' ? item.payload.text : '';
         // A wake from the floor (wakeDue in src/floor.js): said on the desk
@@ -1585,7 +1596,7 @@ class Host {
             this.emit({ type: 'error', channel: desk.channel, agent: desk.agent, code: 'upload_failed', message: `${err.message}; nothing was typed` }, true);
             break;
           }
-          text = UP.withAttachments(text, paths);
+          text = UP.withAttachments(text, paths, typeof item.payload?.attached_by === 'string' ? item.payload.attached_by : null);
           log(`${desk.label}: ${paths.length} attachment${paths.length === 1 ? '' : 's'} in ${UP.uploadsDir()}`);
         }
         // A meeting room's notice is the board's, typed nobody asked for at

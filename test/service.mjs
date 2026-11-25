@@ -8,7 +8,9 @@ import './../src/node-floor.js';
 import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { createHmac } from 'node:crypto';
-import { readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, rmSync, mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const PORT = Number(process.env.SERVICE_TEST_PORT ?? 8903);
 const PORT2 = PORT + 1;
@@ -423,6 +425,79 @@ try {
     assert(!['desk_not_yours', 'relay_guest_scope'].includes(await mcp('open-floor', 'gdev', guest())), 'its own desk, on its own floor: let through');
     const fresh = await mcp('open-floor', 'newcomer', guest());
     assert(!['desk_not_yours', 'relay_guest_scope'].includes(fresh), `a name no desk holds, on its floor: let through (${fresh})`);
+  }
+
+  console.log('\nM3: an agent sends another a file (board.files)');
+  {
+    const UP = await import('../host/uploads.js');
+    const proto = JSON.parse(readFileSync('package.json', 'utf8')).protocol;
+    const reg = (hostId, desks, extra = {}) => fetch(`${B}/api/host/register`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-orchestratinator-key': KEY }, body: JSON.stringify({ host_id: hostId, name: hostId, protocol: proto, desks, ...extra }) });
+    eq((await reg('h-own', [{ channel: 'open-floor', agent: 'odev', cwd: '/o/odev' }, { channel: 'open-floor', agent: 'ofile', cwd: '/o/ofile' }], { files: true })).status, 200, 'the fixture: the owner\'s host runs odev and ofile, and says it sends files');
+    eq((await reg('h-old', [{ channel: 'open-floor', agent: 'oold', cwd: '/o/oold' }])).status, 200, 'and an older host runs oold, saying nothing about files');
+    const work = async (hostId) => (await (await fetch(`${B}/api/host/work?host_id=${encodeURIComponent(hostId)}&wait=0`, { headers: { 'x-orchestratinator-key': KEY } })).json()).work ?? [];
+    await work('h-own'); await work('h-old');
+    // An MCP session as odev, as its Claude Code would have.
+    const mh = (sid) => ({ 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'x-orchestratinator-key': KEY, 'x-channel': 'open-floor', 'x-agent': 'odev', ...(sid ? { 'mcp-session-id': sid } : {}) });
+    const init = await fetch(`${B}/mcp`, { method: 'POST', headers: mh(), body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 't', version: '1' } } }) });
+    const sid = init.headers.get('mcp-session-id'); await init.text();
+    const call = async (args, id = 2) => {
+      const r = await fetch(`${B}/mcp`, { method: 'POST', headers: mh(sid), body: JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'send_file', arguments: args } }) });
+      const t = await r.text();
+      const line = t.split('\n').find((l) => l.startsWith('data:'));
+      const msg = JSON.parse(line ? line.slice(5) : t);
+      return JSON.parse(msg.result?.content?.[0]?.text ?? 'null') ?? msg;
+    };
+    eq((await call({ to: 'nobody', path: '/x' })).code, 'no_recipient', 'to an agent not on the floor: refused in words');
+    eq((await call({ to: 'odev', path: '/x' })).code, 'no_recipient', 'to itself: refused');
+    const dir = mkdtempSync(join(tmpdir(), 'orch-files-'));
+    const file = join(dir, 'report.txt');
+    const bytes = 'A REPORT\n'.repeat(5000);
+    writeFileSync(file, bytes);
+    // The tool waits on odev's host, which this test plays with the host's own code.
+    const pending = call({ to: 'ofile', path: 'report.txt', note: 'please review' }, 3);
+    let item = null;
+    for (let i = 0; i < 40 && !item; i++) { item = (await work('h-own')).find((w) => w.kind === 'send_file'); if (!item) await sleep(100); }
+    eq([item?.agent, item?.payload?.path], ['odev', 'report.txt'], 'odev\'s host is asked to read the path odev named, for odev');
+    const sent = await UP.sendFile({ url: B, token: KEY, hostId: 'h-own', transfer: item.payload.transfer, path: item.payload.path, cwd: dir });
+    eq(sent.ok, true, 'the host reads it, relative to the desk\'s folder, and streams it to the board', JSON.stringify(sent));
+    const res = await pending;
+    eq([res.sent, res.to, res.name, res.size], [true, 'ofile', 'report.txt', bytes.length], 'the tool answers: sent, to whom, the name and the size');
+    const chat = (await work('h-own')).find((w) => w.kind === 'chat' && w.agent === 'ofile');
+    assert(chat?.payload?.text?.startsWith('From odev:\n\nA file: report.txt (') && chat.payload.text.endsWith('please review'), 'ofile is sent a message from odev naming the file, with the note', chat?.payload?.text);
+    eq([chat?.payload?.attached_by, chat?.payload?.files?.length], ['odev', 1], 'carrying the file, attached by odev');
+    const got = await fetch(`${B}/api/host/upload?host_id=h-own&id=${chat.payload.files[0].id}`, { headers: { 'x-orchestratinator-key': KEY } });
+    eq(await got.text(), bytes, 'and ofile\'s host fetches the same bytes');
+    const listed = UP.withAttachments('From odev:\n\nA file.', ['/u/x/report.txt'], 'odev');
+    assert(listed.endsWith('Attached by odev:\n- /u/x/report.txt'), 'the receiving host lists it as attached by odev, not the operator');
+    // A file the host cannot send: its words reach the agent that asked.
+    const missing = call({ to: 'ofile', path: 'nope.txt' }, 4);
+    let item2 = null;
+    for (let i = 0; i < 40 && !item2; i++) { item2 = (await work('h-own')).find((w) => w.kind === 'send_file'); if (!item2) await sleep(100); }
+    await UP.sendFile({ url: B, token: KEY, hostId: 'h-own', transfer: item2.payload.transfer, path: item2.payload.path, cwd: dir });
+    const m = await missing;
+    assert(m.sent === false && m.code === 'file' && /nope\.txt does not exist on this computer/.test(m.error) && /Nothing reached ofile/.test(m.error), 'a missing file: the agent is told, in the host\'s words, and nothing reaches the receiver', JSON.stringify(m));
+    const folder = call({ to: 'ofile', path: dir }, 5);
+    let item3 = null;
+    for (let i = 0; i < 40 && !item3; i++) { item3 = (await work('h-own')).find((w) => w.kind === 'send_file'); if (!item3) await sleep(100); }
+    await UP.sendFile({ url: B, token: KEY, hostId: 'h-own', transfer: item3.payload.transfer, path: item3.payload.path, cwd: dir });
+    assert(/is a folder; send one file/.test((await folder).error ?? ''), 'a folder: refused, one file at a time');
+    // Another host offering bytes for a transfer still open: refused, and
+    // the transfer is still the asked host's to finish.
+    const live = call({ to: 'ofile', path: 'report.txt' }, 6);
+    let item4 = null;
+    for (let i = 0; i < 40 && !item4; i++) { item4 = (await work('h-own')).find((w) => w.kind === 'send_file'); if (!item4) await sleep(100); }
+    const wrongHost = await fetch(`${B}/api/host/file?host_id=h-old&transfer=${item4.payload.transfer}&name=forged.txt`, { method: 'POST', headers: { 'x-orchestratinator-key': KEY }, body: 'forged' });
+    eq(wrongHost.status, 404, 'bytes for an open transfer from a host the board did not ask are refused');
+    await UP.sendFile({ url: B, token: KEY, hostId: 'h-own', transfer: item4.payload.transfer, path: item4.payload.path, cwd: dir });
+    eq([(await live).sent, (await live).name], [true, 'report.txt'], 'and the asked host still completes it with the real file');
+    // oold's host never said it sends files.
+    const mo = (sid2) => ({ ...mh(sid2), 'x-agent': 'oold' });
+    const i2 = await fetch(`${B}/mcp`, { method: 'POST', headers: mo(), body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 't', version: '1' } } }) });
+    const sid2 = i2.headers.get('mcp-session-id'); await i2.text();
+    const r2 = await fetch(`${B}/mcp`, { method: 'POST', headers: mo(sid2), body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'send_file', arguments: { to: 'ofile', path: '/x' } } }) });
+    const t2 = await r2.text(); const l2 = t2.split('\n').find((l) => l.startsWith('data:'));
+    eq(JSON.parse(JSON.parse(l2 ? l2.slice(5) : t2).result.content[0].text).code, 'host_no_files', 'from a desk whose host predates files: refused, saying to update it');
+    rmSync(dir, { recursive: true, force: true });
   }
 
   console.log('\nM2: a card revoked or a building unshared ends the guest\'s desks at once (v6)');

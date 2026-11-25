@@ -669,7 +669,7 @@ function createAdminRouter({ store, auth, closeSessionsFor, meta }) {
  * the operator's agent, on the operator's machine, reading what the operator
  * chose to give it.
  */
-export function createWebRouter({ store, sessions, sessionStats, meta, auth, closeSessionsFor, updates = null, uploads = null }) {
+export function createWebRouter({ store, sessions, sessionStats, meta, auth, closeSessionsFor, updates = null, uploads = null, files = null }) {
   const router = express.Router();
 
   // Update settings, Check now and Update (issue #40; src/updates.js). Ahead
@@ -678,7 +678,7 @@ export function createWebRouter({ store, sessions, sessionStats, meta, auth, clo
   router.use('/api/admin', createAdminRouter({ store, auth, closeSessionsFor, meta }));
   // The floor's own endpoints — ingest, state, per-desk turns, casting. Mounted
   // ahead of the static handler so /api/floor never falls through to index.html.
-  router.use(createFloorRouter({ store, auth, sessions, updates, uploads, protocol: meta.protocol, version: meta.version, closeSessionsFor }));
+  router.use(createFloorRouter({ store, auth, sessions, updates, uploads, protocol: meta.protocol, version: meta.version, closeSessionsFor, files }));
 
   router.get('/api/state', (req, res) => {
     const state = buildState(store, sessions, sessionStats, meta);
