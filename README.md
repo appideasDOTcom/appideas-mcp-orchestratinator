@@ -2,21 +2,22 @@
 
 **Run a team of Claude Code agents from one window, and remain the one who decides.**
 
-**[Download for macOS](https://appideas-mcp-orchestratinator-release.sfo3.cdn.digitaloceanspaces.com/desktop-app/darwin/arm64/Orchestratinator-arm64.dmg)** (Apple silicon)
+In nerd terms, The Orchestratinator is an Agentic Development Environment, complete with built-in MCP. For everyone else, it's a way to get us and our agents to work together and get stuff done.
+
+· **[Download for macOS](https://appideas-mcp-orchestratinator-release.sfo3.cdn.digitaloceanspaces.com/desktop-app/darwin/arm64/Orchestratinator-arm64.dmg)** (Apple silicon)
 · **[Download for Windows](https://appideas-mcp-orchestratinator-release.sfo3.cdn.digitaloceanspaces.com/desktop-app/win32/x64/Orchestratinator-Setup.exe)**
-· Free download · the Orchestratinator itself is open source (GPL-3.0)
+
+Free to download and use · the Orchestratinator itself is open source (GPL-3.0)
 
 ![The Orchestratinator app: a floor of agents at their desks, one desk asking permission, Approve and Deny in its open conversation](docs/images/hero.png)
 
-Run Claude Code in five terminals across three projects and most of your day
-goes to finding out which one is waiting on you, and to carrying one agent's
-answer to another. The Orchestratinator gives each project a floor and each
-agent a desk, all in one window. You see which one needs you and answer it
-there. The agents message each other and hand each other work, and you can
-read all of it. The work is theirs; the decisions stay yours.
+Put teams of agents to work for you, organized how you want and ready to get
+the work done the way you want it done. Each project gets a floor and each
+agent a desk, all in one window. You see what every agent is doing, and you
+step in when one needs you.
 
-We call that a **Human-Agent Team**: agents doing the work, and a person in
-the middle making the calls.
+We call that a **Human-Agent Team (HAT)**: agents doing the work, and a person
+in the middle making the calls.
 
 ## What you get
 
@@ -30,8 +31,16 @@ the middle making the calls.
   project with **New desk here**. Each place gets its own conversation.
 - **Stop carrying messages between agents.** They share a mailbox and a task
   list. Ring a desk's **service bell** to say "you've got work".
-- **Keep your editor.** Sessions you start in Claude Code or VS Code show up on
-  the floor, and **Open in VS Code** hands any conversation back.
+- **Keep your editor (if you want).** Want to keep working in your code
+  editor? Sessions you start in Claude Code or VS Code show up on the floor,
+  and **Open in VS Code** hands any conversation back.
+- **A complete ADE.** The Orchestratinator is a full-featured Agentic
+  Development Environment. Let your agents do the work while you set the
+  direction and make the decisions.
+- **Not just for code.** Any kind of agent works here: writing, research,
+  design, marketing, operations. Different kinds of agents work together as
+  one team; our own marketing and design agents share a floor with our
+  developers.
 
 ## Get started
 
@@ -45,7 +54,9 @@ Nothing else to install or configure, and the app keeps itself up to date.
 
 You need a Claude account that can use Claude Code. The Windows installer
 isn't code-signed, so Windows asks you to confirm the first time. No Linux
-app yet. On a Mac with Homebrew:
+app yet.
+
+On a Mac, if you prefer Homebrew (alternative to the app download above):
 `brew install --cask appideasDOTcom/tap/orchestratinator`.
 
 ## A tour
@@ -59,7 +70,7 @@ is quiet.
 ![A floor with three agents in an In a meeting box, beside that meeting's own window](docs/images/meeting-room.png)
 
 **A meeting.** On the floor, the agents in a meeting stand together. The
-meeting itself is a window of its own: one conversation, every agent's
+meeting itself is a window of its own: one conversation, each agent's
 answers in its own colour.
 
 ![One agent in two meetings at once](docs/images/two-places.png)
