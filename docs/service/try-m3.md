@@ -1,8 +1,8 @@
 # Trying M3: a real subscriber, end to end
 
-> Draft. It's checked against desktop-dev's walk of the paid path before
-> costmo sees it. Wording marked *(check)* is confirmed against a screenshot
-> then.
+> Walked end to end on real staging by desktop-dev, 2026-11-25 (msgs 4530,
+> 4534, 4537, 4552), with screenshots. The words below are the ones on
+> screen.
 
 ## What this shows
 
@@ -36,8 +36,7 @@ http://localhost:8780, and appideas.com is the staging site.
 1. **You:** in your normal browser, open
    https://appideas.ngrok.dev/orchestratinator/. Choose **Town**. Pay with
    the test card `4242 4242 4242 4242`, any future date, and any CVC. Log
-   in, or create your account, when it asks. *(check: the buy panel's own
-   words)*
+   in, or create your account, when it asks.
 2. Your account page now lists the subscription: "Operators: up to 3, you
    included / Shared buildings: 1 at a time".
 
@@ -57,30 +56,32 @@ http://localhost:8780, and appideas.com is the staging site.
    Settings says "Connected as <you>".
 6. **Partner:** in the partner's app, press **Sign in**. Your normal
    browser opens signed in as you; close that tab. In the partner's app,
-   press **Copy sign-in link**, and paste it into a **private** browser
+   beside "Waiting for your browser…", press **Copy sign-in link** (under
+   "Signing in as someone else?") and paste it into a **private** browser
    window. Choose **Sign in with your appideas.com account**, then **Create
    a free account** (an email like `pat+m3@example.test`, a name, a
    password). It comes straight back, and the partner's app says it's
-   connected. *(check: the button's words, once desktop-dev has added it)*
+   connected.
 7. **Partner:** the app says "Opening this board from anywhere and inviting
    people into it need a subscription. Invitations other people give you
-   still work." That's right: Pat hasn't paid.
+   still work." Under "Invite people", it says "Inviting people needs a
+   subscription." That's right: Pat hasn't paid.
 
 ### Invite your partner, and work together
 
 8. **You:** Settings ▸ "Invite people into your buildings". Under
-   "Headquarters at <your computer>", type Pat's email address and press
-   Invite. Pat is listed under "Who can come in".
+   "Headquarters at <your computer>", type Pat's email address in "Their
+   email address" and press Invite. Pat is listed under "Who can come in".
 9. **Partner:** within about half a minute, Pat's app shows
    "<you> invited you to Headquarters at <your computer>", then "You're in."
-10. **Partner:** make a folder for Pat's agent: `mkdir -p /tmp/pat-agent`. In
-    the private browser window at http://localhost:8780, press the Open
-    under **Invitations**. Then Take a desk, go to "/" → private → tmp →
-    pat-agent, name it pat-agent, and press Take.
-11. **Files.** Write a small file, `echo hello > /tmp/pat-agent/hello.txt`.
-    Then, in Pat's browser, ask pat-agent: "Use send_file to send hello.txt
+10. **Partner:** make a folder for Pat's agent: `mkdir -p /tmp/partner-agent`. In
+    the private browser window at http://localhost:8780, under **Invitations**,
+    press **Go in to <you>'s Headquarters**. Then Take a desk, go to "/" → private → tmp →
+    partner-agent, name it partner-agent, and press Take.
+11. **Files.** Write a small file, `echo hello > /tmp/partner-agent/hello.txt`.
+    Then, in Pat's browser, ask partner-agent: "Use send_file to send hello.txt
     to Desk Ask, with a note." In your app, Desk Ask receives a message
-    from pat-agent (Pat's agent) with the file, and can read it.
+    from partner-agent (Pat's agent) with the file, and can read it.
 
 ### Town's limit
 
@@ -92,16 +93,25 @@ http://localhost:8780, and appideas.com is the staging site.
 
 13. **You:** on your account page, cancel the Town subscription. Within
     about 5 minutes:
-    - Your app says your subscription has lapsed.
+    - Your app says "Your subscription has lapsed. People you invited
+      can't come in, and you can't open this board from elsewhere, until
+      it's renewed." 
     - Pat's app says "<you>'s invitations are paused until their
       subscription is renewed."
     - Pat's agent goes offline on your floor.
     - Nothing on either board is lost.
-14. **You:** buy Town again (step 1). Within about 5 minutes Pat's access,
-    and Pat's agent on your floor, come back without anyone doing
-    anything.
+14. **You:** buy Town again (step 1). Within about 5 minutes your app is
+    back to "Connected". Pat's app says "You're in." again, and Pat's
+    agent is live on your floor in the same conversation, without anyone
+    doing anything.
 15. Quit both app windows (⌘Q), and remove the folder if you like:
-    `rm -rf /tmp/pat-agent`.
+    `rm -rf /tmp/partner-agent`.
+
+## You'll also see
+
+A few offline desks on your floor in the scratch app (desk-auto, mover,
+pat-agent, pat-test, pat-test2). They're left over from the walks and
+harmless. Desk Ask, which step 11 uses, is there and signed in.
 
 ## Not in this walk
 
