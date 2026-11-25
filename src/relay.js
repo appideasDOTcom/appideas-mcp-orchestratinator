@@ -186,7 +186,7 @@ export function createScope({ store }) {
     }
     // A desk's own operator's actions, and an agent's or hook's identity.
     const desk = (channel, agent) => (channel && agent ? store.deskOperator(String(channel), String(agent)) : null);
-    const notYours = (who) => refuse(403, 'desk_not_yours', `That desk is ${who.name ?? (who.op ? 'a guest\'s' : 'the board owner\'s')}: only its own operator can do that.`);
+    const notYours = (who) => refuse(403, 'desk_not_yours', `That desk is ${who.name ? `${who.name}'s` : (who.op ? 'a guest\'s' : 'the board owner\'s')}: only its own operator can do that.`);
     if (OWN_ROUTES.has(what) || (what === 'POST /api/floor/chat' && SETTING_COMMAND.test(String(req.body?.text ?? '')))) {
       const who = desk(req.body?.channel, req.body?.agent);
       if (who && who.op !== me.op && (who.op || me.op)) return notYours(who.op ? who : { op: null, name: store.ownerName?.() ?? null });

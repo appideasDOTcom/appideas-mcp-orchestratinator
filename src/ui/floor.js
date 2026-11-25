@@ -1699,7 +1699,9 @@
   /** A desk's state, in the one word the room is drawn from. */
   function deskState(d) {
     if (!d.live) return 'away';
-    if (d.session?.awaiting_kind) return 'needs-you';
+    // Another operator's desk asking is waiting on them, not on this viewer
+    // (`mine`, board.relay v6): drawn as busy, never as needs-you.
+    if (d.session?.awaiting_kind) return d.mine === false ? 'working' : 'needs-you';
     // The server's answer, not a second reading of the same two columns. It
     // used to be `hosted.state === 'working' || last_turn.role === 'tool'` right
     // here, which was fine until the stop sign needed the same fact: a desk
@@ -6355,7 +6357,7 @@
    * in, so the tab pulses for it as for a question (costmo, 2026-11-19: the
    * pulse is for anything waiting on him).
    */
-  const deskAsking = (d) => !!d?.live && (/^permission_/.test(d.session?.awaiting_kind ?? '') || !!d.signin);
+  const deskAsking = (d) => !!d?.live && d.mine !== false && (/^permission_/.test(d.session?.awaiting_kind ?? '') || !!d.signin);
 
   /**
    * A desk a "nudge all" sends to, which is what a pending nudge is: something

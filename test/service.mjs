@@ -358,10 +358,23 @@ try {
     eq(desk('open-floor', 'gdev')?.hosted?.operator, { op: 'op_g', name: 'Gail' }, 'the guest\'s desk is the guest\'s');
     eq(desk('open-floor', 'odev')?.hosted?.operator, null, 'the owner\'s is the owner\'s');
     eq(desk('private', 'gx')?.hosted ?? null, null, 'a desk the guest\'s host named outside its card was not filed');
+    eq([desk('open-floor', 'odev')?.mine, desk('open-floor', 'gdev')?.mine], [true, false], 'for the owner, its own desk is mine and the guest\'s is not');
+    const gf = await (await fetch(`${B}/api/floor`, { headers: hdr(guest()) })).json();
+    const gdesk = (ag) => gf.channels.find((c) => c.channel === 'open-floor').desks.find((d) => d.agent === ag);
+    eq([gdesk('odev')?.mine, gdesk('gdev')?.mine], [false, true], 'for the guest, the other way round');
+    // A question on the owner's desk is the owner's to answer: it needs the
+    // owner, and not the guest (desktop-dev's walk, Pat's "1 need you").
+    await fetch(`${B}/api/host/events`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-orchestratinator-key': KEY },
+      body: JSON.stringify({ host_id: 'h-own', events: [{ type: 'ask', channel: 'open-floor', agent: 'odev', session_id: 's-odev', request_id: 'q-own', kind: 'permission', tool: 'Write', tool_input: { file_path: 'x' }, summary: 'Write: x', options: [{ n: 1, text: 'Yes' }, { n: 3, text: 'No' }] }] }) });
+    const asks = async (p) => { const j = await (await fetch(`${B}/api/floor`, { headers: p ? hdr(p) : {} })).json(); return [j.queue.map((q) => q.agent), j.totals.awaiting, j.channels.find((c) => c.channel === 'open-floor').awaiting]; };
+    eq(await asks(), [['odev'], 1, 1], 'the owner\'s floor counts its own desk\'s question as needing it');
+    eq(await asks(guest()), [[], 0, 0], 'the guest\'s floor does not');
     eq((await json(await reg('op_g~mac', [{ channel: 'open-floor', agent: 'gdev', cwd: '/g/gdev' }, { channel: 'open-floor', agent: 'odev', cwd: '/g/steal' }], guest()))).status, 200, 'the guest\'s host naming the owner\'s desk registers');
     eq((await (await fetch(`${B}/api/floor`)).json()).channels.find((c) => c.channel === 'open-floor').desks.find((d) => d.agent === 'odev').hosted.host_id, 'h-own', 'and the owner\'s desk stays the owner\'s host\'s');
     const act = async (path, body, p) => (await json(await fetch(`${B}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', ...(p ? hdr(p) : {}) }, body: JSON.stringify(body) }))).body?.code;
     eq(await act('/api/floor/interrupt', { channel: 'open-floor', agent: 'gdev' }), 'desk_not_yours', 'the owner at the keyboard cannot stop the guest\'s agent');
+    const words = (await json(await fetch(`${B}/api/floor/interrupt`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ channel: 'open-floor', agent: 'gdev' }) }))).body?.error ?? '';
+    assert(words.startsWith('That desk is Gail\'s:'), 'and is told whose it is, in a sentence', words);
     eq(await act('/api/floor/interrupt', { channel: 'open-floor', agent: 'odev' }, guest()), 'desk_not_yours', 'the guest cannot stop the owner\'s');
     eq(await act('/api/floor/permission', { channel: 'open-floor', agent: 'odev', request_id: 'r', decision: 'allow' }, guest()), 'desk_not_yours', 'nor answer its prompt');
     eq(await act('/api/floor/permission', { channel: 'open-floor', agent: 'gdev', request_id: 'r', decision: 'allow' }, owner()), 'desk_not_yours', 'nor the owner, relayed, the guest\'s');

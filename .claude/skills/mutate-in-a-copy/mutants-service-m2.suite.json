@@ -215,5 +215,19 @@
   "src/relay.js",
   "      if (!who && guest && ch && ag) store.setDeskOperator?.(String(ch), String(ag), me.op, me.name);",
   ""
+ ],
+ [
+  "mine: every desk the viewer's",
+  "service",
+  "src/floor.js",
+  "    const mineOf = (channel, agent) => { const o = store.deskOperator?.(channel, agent); return !o || (o.op ?? null) === me; };",
+  "    const mineOf = () => true;"
+ ],
+ [
+  "refusal: 'is Gail:' not 'Gail's'",
+  "service",
+  "src/relay.js",
+  "`That desk is ${who.name ? `${who.name}'s` :",
+  "`That desk is ${who.name ? `${who.name}` :"
  ]
 ]

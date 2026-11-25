@@ -62,6 +62,8 @@ const secs = await g.evalJs(`JSON.stringify([...document.querySelectorAll('#set-
 ok(!/set-buildings|set-updates|Export|Recover/.test(secs), 'Settings has none of the board\'s own sections', secs);
 await g.key('Escape');
 
+ok(await g.evalJs(`document.getElementById('server-meta').textContent.trim()`) === '', 'the guest\'s header says nothing of the board\'s machine, and prints no gaps', await g.evalJs(`document.getElementById('server-meta').textContent`));
+
 console.log('\nthe guest on the owner\'s desk');
 await openDesk(g, 'beta', 'fay');
 let p = await panel(g);
@@ -106,6 +108,11 @@ await fetch(`${direct}/api/host/events`, { method: 'POST', headers: { 'content-t
 await until(o, `/rm -rf build/.test(document.querySelector('#floor-panel .p-alert-slot')?.textContent ?? '')`, 'gwen\'s prompt is shown to the owner');
 p = await panel(o);
 ok(p.alert.enabled === 0, 'with nothing in it the owner can press', JSON.stringify(p.alert));
+// Gwen's question is Gail's to answer, so it does not need the owner
+// (desktop-dev's walk: the asking floor said "1 need you" for someone
+// else's agent).
+await until(o, `/· 0 need you$/.test(document.getElementById('floor-totals').textContent)`, 'the owner\'s totals do not count Gwen\'s question');
+ok(true, 'the owner\'s floor says 0 need you while Gwen asks Gail');
 ok(/Gail answers Gwen's prompts/.test(p.alert.text), 'and a line saying Gail answers it', p.alert.text);
 const ph = await o.evalJs(`document.getElementById('p-text').placeholder`);
 ok(/asking Gail something .* once they answer/.test(ph), 'the box says a message waits for Gail\'s answer, not "yours"', ph);

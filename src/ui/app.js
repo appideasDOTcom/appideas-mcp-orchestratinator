@@ -471,6 +471,9 @@ function renderServer(state) {
   const shown = headerVersion(navigator.userAgent, s.version);
   el.version.textContent = shown.text;
   el.version.title = shown.title;
+  // A guest is told nothing of the board's machine (board.relay v4), so its
+  // header carries no port or path either, rather than printing the gaps.
+  if (state.viewer?.role === 'guest') { el.meta.textContent = ''; el.meta.title = ''; return; }
   el.meta.textContent = `up ${duration(s.uptime_seconds)} · port ${s.port} · db ${s.db_path} · claim ttl ${s.claim_ttl_minutes}m · ${s.now.replace('T', ' ').slice(0, 19)}Z`;
   // Connection churn is a client trait, not a coordination fact — keep it out of
   // the way, but reachable when a session count looks surprising.

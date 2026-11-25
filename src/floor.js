@@ -4272,6 +4272,19 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     // `owner`: the owner's name as the board last verified it (relay hello),
     // so the page names whose a desk is rather than "the board owner".
     const out = { ...buildFloor(store, live, sessions), viewer: viewerOf(req), owner: store.ownerName?.() ?? null };
+    // Whose each desk is, for this viewer (board.relay v6; desktop-dev's
+    // walk: Pat's floor said "1 need you", with the red mark, for a question
+    // only Chris can answer). `mine` is false on another operator's desk; its
+    // questions are not this viewer's to answer, so they are not counted as
+    // needing them, and the page draws such a desk as busy, not asking.
+    const me = requesterOp(req);
+    const mineOf = (channel, agent) => { const o = store.deskOperator?.(channel, agent); return !o || (o.op ?? null) === me; };
+    for (const c of out.channels) {
+      for (const d of c.desks) d.mine = mineOf(c.channel, d.agent);
+      c.awaiting = c.desks.filter((d) => d.mine && d.live && (d.session?.awaiting_kind || d.permission?.startup)).length;
+    }
+    out.queue = out.queue.filter((q) => mineOf(q.channel, q.agent));
+    out.totals = { ...out.totals, awaiting: out.queue.length };
     const guest = guestOf(req);
     if (guest) {
       // A guest sees its card's buildings and nothing else (board.relay v4).

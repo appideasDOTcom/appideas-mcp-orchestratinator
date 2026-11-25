@@ -44,12 +44,14 @@ Your own everyday Orchestratinator app is not touched.
 A Key is what connects one computer's app to the service.
 
 3. **You:** in your normal browser, open http://localhost:8780. Type your
-   name and press Sign in. Under Keys, press New Key and copy it.
+   name and press Sign in. Under Keys, type a name for this computer in
+   "Which computer?" (say "My Mac"), press New Key, and copy the Key. It
+   is shown once.
 4. **You:** in your app, open Settings (⌘,). Under Service, paste the Key
    and press Connect. It says "Connected as <your name>".
 5. **Partner:** in a private browser window, open http://localhost:8780.
    Type a name for your partner (say "Pat") and press Sign in. Make a Key
-   and paste it into the **partner's** app the same way.
+   ("Pat's Mac") and paste it into the **partner's** app the same way.
 
 ### Invite your partner
 
@@ -62,25 +64,35 @@ A Key is what connects one computer's app to the service.
 
 ### Bring an agent into your building
 
-8. **Partner:** in the private browser window, reload. Under Invitations,
-   press Open beside your building. That's your floor, as Pat sees it.
-9. **Partner:** press Take a desk. Choose the computer named "Pat's
-   <computer>", pick a folder from the list, give the agent a name, and
-   press Take. That agent runs on Pat's computer and now sits on your
-   floor.
+8. **Partner:** in the private browser window, reload. Pat's page lists
+   two things that each have an Open: "Your boards" (Pat's own board) and,
+   below it, **Invitations**. Press the Open beside "<you> invited you to
+   Headquarters at <your computer>". That's your floor, as Pat sees it.
+9. **Partner:** first, in Terminal, make a folder for Pat's agent to live
+   in, so nothing touches a real project: `mkdir -p /tmp/pat-agent`. Then,
+   on your floor in Pat's browser, press Take a desk. Pat can only take a
+   desk on Pat's own computer, so the dialog goes straight to its folders.
+   Click "/" → private → tmp → pat-agent, give the agent a name
+   (pat-agent), and press Take. That agent runs on Pat's computer and now
+   sits on your floor.
 
 ### Work together
 
-10. **You:** in your app, open your floor. Pat's agent is there. Send it a
-    message; it is told the message is from you.
-11. **Partner:** send Desk Ask (your agent) a message asking it to write a
-    small file. It asks permission. Pat can see the question but can't
-    answer it. You answer it in your app, and the file is written.
-12. **You:** select both agents and open a meeting room. Each agent's note
-    says both of you are there.
+10. **You:** in your app, open your floor. Pat's agent is there. Click it
+    and send it a message; it is told the message is from you, and Pat
+    sees your name on it.
+11. **Partner:** click Desk Ask (your agent) and send it a message asking
+    it to write a small file. It asks permission. In Pat's browser the
+    question is shown, dimmed, with "<you> answers Desk Ask's prompts", and
+    it doesn't count as "needs you" there. In your app it does: answer it
+    there, and the file is written.
+12. **You:** on your floor, press "select desks" in the floor's header,
+    tick Desk Ask and Pat's agent, and press Meeting room. A room window
+    opens, and each agent's note says both of you are there.
 
 ### Remove your partner
 
 13. **You:** in Settings, press Remove beside Pat. Pat's agent leaves your
     floor at once, and Pat's app says "<you> removed you."
-14. Quit both app windows (⌘Q).
+14. Quit both app windows (⌘Q), and remove the folder if you like:
+    `rm -rf /tmp/pat-agent`.
