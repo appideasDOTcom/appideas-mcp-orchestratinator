@@ -152,5 +152,47 @@
   "src/ui/app.js",
   "filter((c) => c.archived && inBuildingNow(c, b))",
   "filter((c) => c.archived)"
+ ],
+ [
+  "headquarters: the first day's board keeps Main",
+  "service",
+  "src/db.js",
+  "    const renamed = db.prepare(\"UPDATE buildings SET name = ? WHERE is_default = 1 AND name = 'Main'",
+  "    const renamed = db.prepare(\"UPDATE buildings SET name = ? WHERE 0 AND is_default = 1 AND name = 'Main'"
+ ],
+ [
+  "headquarters: renamed at every start",
+  "service",
+  "src/db.js",
+  "  if (!db.prepare(\"SELECT 1 FROM settings WHERE key = 'migration.headquarters'\").get()) {",
+  "  if (true) {"
+ ],
+ [
+  "viewer: no machine named remotely",
+  "service",
+  "src/floor.js",
+  "{ remote: true, name: req.relay.name, machine: hostname() }",
+  "{ remote: true, name: req.relay.name }"
+ ],
+ [
+  "page: the composer takes a message while the board is down",
+  "service",
+  "src/ui/floor.js",
+  "const canChat = !!h?.live && !held && !ui.boardDown;",
+  "const canChat = !!h?.live && !held;"
+ ],
+ [
+  "page: board_offline read as no answer",
+  "service",
+  "src/ui/floor.js",
+  "    if (code === 'board_offline') return",
+  "    if (code === 'board_offline_x') return"
+ ],
+ [
+  "page: remotely, no machine on one building",
+  "service",
+  "src/ui/app.js",
+  "    return machine && one ? `<span class=\"bld-where\">${esc(one.name)} ${at}</span>` : '';",
+  "    return '';"
  ]
 ]

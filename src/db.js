@@ -99,6 +99,22 @@ export function openDb(path) {
     );
     CREATE UNIQUE INDEX IF NOT EXISTS idx_buildings_name ON buildings(name COLLATE NOCASE);
 
+    -- Whose a guest's desk is, kept beyond its host row (board.relay v6,
+    -- desktop-dev's revoke re-walk): a guest's desk can outlive its host's
+    -- record (the window died, the host went), and a revoke must still find
+    -- it to end it. Written when a guest's host files a desk or a guest's
+    -- agent connects as a new name; read by deskOperator when no host runs
+    -- the desk. The owner's desks have no row. Not in BACKUP_TABLES: it names
+    -- operators of a service session, not the team's work.
+    CREATE TABLE IF NOT EXISTS desk_operators (
+      channel    TEXT NOT NULL,
+      agent      TEXT NOT NULL,
+      operator   TEXT NOT NULL,
+      name       TEXT,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (channel, agent)
+    );
+
     -- The same flag one level down (issue #20): a desk the operator has put
     -- away by hand. Shared and audited like archive, and for the same reason
     -- — a browser-local hide was the "minimize" removed in #21, and every
@@ -555,7 +571,22 @@ export function openDb(path) {
   // the row an operator's statement about a floor lives on: it is backed up,
   // restored one floor at a time, and swept by purgeChannel with the floor.
   addColumn(db, 'channel_flags', 'building_id', 'TEXT');
+  // Whose a host is (board.relay v4, M2): NULL for a host registered at the
+  // board's own machine, which is the owner's; the service's operator id for
+  // one registered through the relay as a guest. A desk belongs to its host's
+  // operator, and only that operator answers its prompts or moves it.
+  addColumn(db, 'hosts', 'operator', 'TEXT');
+  addColumn(db, 'hosts', 'operator_name', 'TEXT');
   ensureDefaultBuilding(db);
+  // The default was "Main" for the first day (4bdd410), and costmo named it
+  // Headquarters the next morning. A board that still has the old default
+  // name takes the new one, once: the settings row records that it was done,
+  // so an operator who names a building "Main" afterwards keeps it.
+  if (!db.prepare("SELECT 1 FROM settings WHERE key = 'migration.headquarters'").get()) {
+    const renamed = db.prepare("UPDATE buildings SET name = ? WHERE is_default = 1 AND name = 'Main' AND NOT EXISTS (SELECT 1 FROM buildings WHERE name = ? COLLATE NOCASE)")
+      .run(DEFAULT_BUILDING_NAME, DEFAULT_BUILDING_NAME).changes;
+    db.prepare("INSERT INTO settings (key, value) VALUES ('migration.headquarters', ?)").run(renamed ? 'renamed' : 'kept');
+  }
 
   migratePersonas(db);
   migrateAgentNames(db);
@@ -666,8 +697,8 @@ function migrateAgentNames(db) {
   console.log(`[db] agent_names -> agent_profile (${moved} name${moved === 1 ? '' : 's'} carried over)`);
 }
 
-/** The default building's name on a board that has never had one. */
-export const DEFAULT_BUILDING_NAME = 'Main';
+/** The default building's name on a board that has never had one (costmo, 2026-11-25). */
+export const DEFAULT_BUILDING_NAME = 'Headquarters';
 
 /** An opaque building id: b_ and ten base32 characters (50 bits). */
 export function newBuildingId() {
@@ -1608,7 +1639,7 @@ export function makeStore(db) {
     ),
     setHostRefused: db.prepare(`UPDATE hosts SET refused = ? WHERE host_id = ?`),
     touchHost: db.prepare(`UPDATE hosts SET last_seen = datetime('now') WHERE host_id = ?`),
-    listHosts: db.prepare(`SELECT host_id, name, tmux_session, seats, uploads, signins, signed_out, registered_at, last_seen FROM hosts ORDER BY name`),
+    listHosts: db.prepare(`SELECT host_id, name, tmux_session, seats, uploads, signins, signed_out, registered_at, last_seen, operator, operator_name FROM hosts ORDER BY name`),
     hostUploads: db.prepare(`SELECT uploads FROM hosts WHERE host_id = ?`),
     hostReconnects: db.prepare(`SELECT reconnects FROM hosts WHERE host_id = ?`),
     upsertHostedDesk: db.prepare(
@@ -1651,7 +1682,8 @@ export function makeStore(db) {
       `SELECT d.channel, d.agent, d.host_id, d.cwd, d.sdk_session_id, d.state, d.updated_at,
               d.window_id, d.outside_pid, d.window_open, d.holders, d.clients, d.scope,
               h.name AS host_name, h.last_seen AS host_seen, h.tmux_session AS host_tmux,
-              h.signins AS host_signins, h.signed_out AS host_signed_out, h.refused AS host_refused
+              h.signins AS host_signins, h.signed_out AS host_signed_out, h.refused AS host_refused,
+              h.operator AS host_operator, h.operator_name AS host_operator_name
          FROM hosted_desks d
          LEFT JOIN hosts h ON h.host_id = d.host_id`
     ),
@@ -1800,7 +1832,7 @@ export function makeStore(db) {
   const purgeChannel = db.transaction((channel, by) => {
     const counts = {};
     for (const table of ['messages', 'tasks', 'contracts', 'contract_history', 'agents',
-      'channel_flags', 'desk_flags', 'agent_sessions', 'turns', 'personas', 'hosted_desks', 'host_outbox', 'meeting_rooms', 'desk_twins', 'room_told']) {
+      'channel_flags', 'desk_flags', 'agent_sessions', 'turns', 'personas', 'hosted_desks', 'host_outbox', 'meeting_rooms', 'desk_twins', 'room_told', 'desk_operators']) {
       counts[table] = db.prepare(`DELETE FROM ${table} WHERE channel = ?`).run(channel).changes;
     }
     q.insertAdminEvent.run({
@@ -2343,6 +2375,35 @@ export function makeStore(db) {
       }
       return { adopted, kept };
     }),
+
+    // --- the owner's name, for attribution (board.relay v4) ---------------------
+    /** The last owner identity a relayed request verified (GET /api/relay/hello), or null. */
+    ownerName: () => { try { return JSON.parse(db.prepare("SELECT value FROM settings WHERE key = 'relay.owner'").get()?.value ?? 'null')?.name ?? null; } catch { return null; } },
+    setOwner: (op, name) => db.prepare(`INSERT INTO settings (key, value) VALUES ('relay.owner', ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`).run(JSON.stringify({ op, name })).changes,
+
+    // --- whose a host and a desk are (board.relay v4) ---------------------------
+    setHostOperator: (hostId, op, name) => db.prepare('UPDATE hosts SET operator = ?, operator_name = ? WHERE host_id = ?').run(op ?? null, op ? (name ?? null) : null, hostId).changes,
+    /**
+     * The operator a desk belongs to: {op, name} of its host's guest, {op:
+     * null} for the owner's host, else the guest it was last known as
+     * (desk_operators), else null (nobody's yet).
+     */
+    deskOperator: (channel, agent) => {
+      const r = db.prepare(`SELECT h.operator, h.operator_name FROM hosted_desks d JOIN hosts h ON h.host_id = d.host_id WHERE d.channel = ? AND d.agent = ?`).get(channel, agent);
+      if (r) return { op: r.operator ?? null, name: r.operator_name ?? null };
+      const k = db.prepare('SELECT operator, name FROM desk_operators WHERE channel = ? AND agent = ?').get(channel, agent);
+      return k ? { op: k.operator, name: k.name ?? null } : null;
+    },
+    setDeskOperator: (channel, agent, op, name) => db.prepare(`INSERT INTO desk_operators (channel, agent, operator, name) VALUES (?, ?, ?, ?)
+      ON CONFLICT(channel, agent) DO UPDATE SET operator = excluded.operator, name = excluded.name, updated_at = datetime('now')`).run(channel, agent, op, name ?? null).changes,
+    desksOfOperator: (op) => db.prepare('SELECT channel, agent FROM desk_operators WHERE operator = ?').all(op),
+    /** A host whose operator's access ended (POST /api/relay/access): unheard from as of now, so it reads offline at once, not after the liveness window. Its next registration, if its access returns, brings it back. */
+    retireHost: (hostId) => db.prepare("UPDATE hosts SET last_seen = datetime('now', '-1 day') WHERE host_id = ?").run(hostId).changes,
+    hostOperator: (hostId) => {
+      const r = db.prepare('SELECT operator, operator_name FROM hosts WHERE host_id = ?').get(hostId);
+      return { op: r?.operator ?? null, name: r?.operator_name ?? null };
+    },
 
     // --- buildings --------------------------------------------------------------
     listBuildings,

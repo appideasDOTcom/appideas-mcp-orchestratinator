@@ -2082,3 +2082,9 @@ body.meeting .deskpanel { display: flex; flex-direction: column; }
 .set-buildings .set-bld input[type="text"] { flex: 1; min-width: 0; }
 .set-buildings .set-bld-floor { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin: 2px 0; }
 .set-buildings .set-bld-floor select { max-width: 50%; }
+.bld-where { white-space: nowrap; }
+.bld-at { margin-left: 4px; white-space: nowrap; }
+/* The board does not answer: one line over the page, and the floor dimmed
+   so its desks do not read as live (costmo, 2026-11-25). */
+.board-down-bar { margin: 8px 18px 0; padding: 8px 12px; border: 1px solid var(--busy); border-radius: 6px; color: var(--busy); background: var(--busy-bg); }
+body.board-down #floor-rooms, body.board-down .meet-boxes { opacity: 0.45; }

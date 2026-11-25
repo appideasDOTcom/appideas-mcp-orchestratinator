@@ -22,7 +22,7 @@ node $HERE/relay-hop.mjs "$HOP" "http://127.0.0.1:$PORT" k "$SECRET" > "$S/hop.l
 echo '{}' > "$S/host.json"
 node $HERE/seed-select.mjs "http://localhost:$PORT" "$S/b.db" "$S/host.json" > "$S/work.jsonl" 2> "$S/seed.err" & SEED=$!
 sleep 2
-ORCH_CDP_PORT=$CDP node --experimental-websocket $HERE/check-relayed.mjs "http://b7k2.localhost:$HOP" "$S/shots" "http://localhost:$PORT" 2> "$S/check.err" | tee "$S/out.txt"; rc=${PIPESTATUS[0]}
+ORCH_CDP_PORT=$CDP node --experimental-websocket $HERE/check-relayed.mjs "http://b7k2.localhost:$HOP" "$S/shots" "http://localhost:$PORT" "$SRV" "$(node -e 'console.log(require("os").hostname())')" 2> "$S/check.err" | tee "$S/out.txt"; rc=${PIPESTATUS[0]}
 kill $SEED $SRV $HOPP 2>/dev/null; wait $SEED $SRV $HOPP 2>/dev/null
 pkill -f "remote-debugging-port=$CDP( |\$)" 2>/dev/null
 for _ in $(seq 1 40); do taken "$CDP" json/version || break; sleep 0.25; done

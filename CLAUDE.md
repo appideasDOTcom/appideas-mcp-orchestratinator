@@ -445,7 +445,7 @@ they still describe tmux, which holds for an interactive Claude Code only.
 Other skills mention tmux in passing (verify-ui-change, capture-a-burst,
 measure-the-desktop, recover-a-lost-record).
 
-## The service round: buildings and a relayed request (2026-11-24, M1)
+## The service round: buildings, a relayed request, guests (M1 2026-11-24, M2 2026-11-25)
 
 costmo's brief that day: a paid service, for the **desktop app only** (the
 Docker app never connects to it), for agents on several computers in one
@@ -481,12 +481,38 @@ This repo's half of M1:
   - Five routes that open something on the board machine's own screen are
     `409 relay_local_only`. The page leaves them out for a remote viewer
     (`viewer` on both payloads).
+- **M2, a guest in an owner's building** (board.relay v4 to v6,
+  2026-11-25; costmo's decisions 12 to 15 in `service.plan`).
+  - **The guest role.** A relayed request may be role `guest`, carrying the
+    building ids its Key Card opens. It reaches those buildings' floors only
+    (`relay_guest_scope`), none of the board's administration, and no server
+    details.
+  - **Hosts and desks have operators.** A host registered through the relay
+    as a guest is that guest's (`hosts.operator`, its id `<op>~…`), and so
+    are its desks; the board remembers a guest's desk beyond its host row
+    (`desk_operators`).
+  - **Only a desk's own operator acts on it.** Answering its prompts,
+    stopping it, its model, opening, moving or reading its conversation, and
+    any slash command, are `desk_not_yours` to anyone else. Work for a host
+    is `host_not_yours` to anyone else, the owner included, so nobody starts
+    or drives another computer's Claude Code.
+  - **Talk runs both ways and names its sender.** The agent reads
+    `From <name>:`, and the page draws the name (`from` on a turn).
+  - **A revoke or an unshare drops the guest's desks at once.**
+    `POST /api/relay/access`, owner-signed, sent by the app's hop when the
+    service says so.
+  - **A room's note names both operators** when both are in it.
+  - **Bringing an existing agent in is the release path** (Take a desk on a
+    folder bound to the guest's own board). A second session for such a
+    folder is not built: the board refuses a seat for an `other_board`
+    folder.
 - Tested by `npm run test:service` (both halves), the page checks
-  **check-buildings.mjs** and **check-relayed.mjs** (the page served
-  through `relay-hop.mjs`, a stand-in for the app's hop, from
-  `http://<b>.localhost`), and the mutant lists
-  `mutants-service-m1.suite.json` and `mutants-service-m1.page.json`. Three
-  second guards survive by design, and their comments say so.
+  **check-buildings.mjs**, **check-relayed.mjs** (the page served through
+  `relay-hop.mjs`, a stand-in for the app's hop, from
+  `http://<b>.localhost`) and **check-guest.mjs** (two such hops, an owner
+  and a guest), and the mutant lists `mutants-service-m1.*` and
+  `mutants-service-m2.*`. The second guards that survive by design say so
+  in their comments.
 
 ## Three boards, one of them ours
 

@@ -151,3 +151,28 @@ For M2, noted from the walk: the page's header shows a remote viewer the
 board's port and database path. That's harmless for the owner, and to be
 hidden from a guest.
 
+## M2's result (2026-11-25)
+
+The board's half is board.relay v4 to v6 (see `board-relay.md`). It was
+walked end to end by desktop-dev with two scratch apps as two operators
+through the service's `make dev` (msgs 4437, 4444, 4448, 4450):
+- the owner shared Headquarters and gave a card;
+- the guest's host came up on the owner's board, and the guest took a desk
+  that runs on the guest's computer and sits on the owner's floor;
+- talk ran both ways, with every message naming its sender;
+- a meeting room held both operators' agents, and its note named both;
+- each side was refused the other's prompts, model and host work;
+- after a revoke, the guest's desks left the owner's floor within 0.3 s.
+
+The walk found three things on the board, all fixed:
+- desks lingering for about 90 s after a revoke (now the access route);
+- a room note naming only "the operator";
+- a hostless guest desk reading live after a revoke (now desk_operators,
+  with its sessions ended).
+
+Decision 14: Move there is the existing release path. A second session for a
+folder bound to another instance is not built yet.
+
+Before costmo tries it, the board's M2 tree must be committed and pushed so
+the desktop app's pin can move to it. The steps are desktop-dev's msg 4452.
+

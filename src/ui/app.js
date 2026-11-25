@@ -168,11 +168,20 @@ function buildingNow(buildings, wanted) {
 /** A building chip's link: that building, on its whole set of floors. */
 const buildingHref = (id) => `?${new URLSearchParams({ building: id, floor: '' })}`;
 
-/** The picker: nothing with one building, a chip each with two or more. */
-function buildingChips(buildings, shown) {
+/**
+ * The picker: nothing with one building, a chip each with two or more. Seen
+ * remotely (`machine`, the board's computer), it also says where the
+ * building is: "Headquarters at costmo4.local", on the one building's own
+ * label or after the chips (costmo, 2026-11-25).
+ */
+function buildingChips(buildings, shown, machine = null) {
   const list = buildings ?? [];
-  if (list.length < 2) return '';
-  return list.map((b) => `<a class="chip${b.id === shown ? ' on' : ''}" href="${esc(buildingHref(b.id))}" data-building="${esc(b.id)}" title="${esc(`The ${b.name} building`)}">${esc(b.name)}</a>`).join('');
+  const at = machine ? `<span class="muted bld-at">at ${esc(machine)}</span>` : '';
+  if (list.length < 2) {
+    const one = list.find((b) => b.id === shown) ?? list[0];
+    return machine && one ? `<span class="bld-where">${esc(one.name)} ${at}</span>` : '';
+  }
+  return list.map((b) => `<a class="chip${b.id === shown ? ' on' : ''}" href="${esc(buildingHref(b.id))}" data-building="${esc(b.id)}" title="${esc(`The ${b.name} building${machine ? ` at ${machine}` : ''}`)}">${esc(b.name)}</a>`).join('') + at;
 }
 
 /* ---------- end buildings ---------- */
@@ -207,7 +216,8 @@ function setBuilding(id) {
 function drawBuildingPick() {
   const pick = document.getElementById('building-pick');
   if (!pick) return;
-  const html = buildingChips(buildingsSeen, currentBuilding());
+  const v = ui.state?.viewer ?? globalThis.floorViewer?.() ?? null;
+  const html = buildingChips(buildingsSeen, currentBuilding(), v?.remote ? (v.machine ?? null) : null);
   if (pick.dataset.sig !== html) { pick.dataset.sig = html; pick.innerHTML = html; }
 }
 window.buildings = { note: (list) => { noteBuildings(list); drawBuildingPick(); }, current: () => currentBuilding(), set: setBuilding, list: () => buildingsSeen };
@@ -1496,6 +1506,10 @@ function toolsPanel(compact = IN_APP) {
        </div>`
     : '';
 
+  // A guest of this board (board.relay v4) has this browser's own settings
+  // and none of the board's: its buildings, backups and updates are the
+  // owner's, and the board refuses them to a guest.
+  if (ui.state?.viewer?.role === 'guest') return `${autoRefreshSection(compact)}${floorsSection()}`;
   return `
     ${autoRefreshSection(compact)}
     ${floorsSection()}

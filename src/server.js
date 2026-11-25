@@ -9,7 +9,7 @@ import { openDb, makeStore } from './db.js';
 import { registerTools } from './tools.js';
 import { createWebRouter } from './web.js';
 import { createAuth } from './auth.js';
-import { createRelay } from './relay.js';
+import { createRelay, createScope } from './relay.js';
 import { buildCommit } from './build-info.js';
 import { createUpdates } from './updates.js';
 import { createUploads } from './uploads.js';
@@ -126,6 +126,9 @@ app.use((req, res, next) => {
   if (req.path === UPLOAD_PATH) return next();
   return (RESTORE_PATHS.has(req.path) ? jsonRestore : jsonBody)(req, res, next);
 });
+// Who may do what, now that a body names its floor and desk (board.relay
+// v4): a guest's buildings, and a desk's own operator's actions.
+app.use(createScope({ store }));
 
 // One transport per MCP session (keyed by the mcp-session-id header).
 const transports = Object.create(null);

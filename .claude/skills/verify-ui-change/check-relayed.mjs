@@ -17,6 +17,8 @@ import { open } from './drive.mjs';
 const base = process.argv[2];
 const shots = process.argv[3] ?? '/tmp';
 const direct = process.argv[4];
+const boardPid = Number(process.argv[5] ?? 0);
+const machine = process.argv[6] ?? '';
 let fails = 0;
 let total = 0;
 const ok = (cond, msg, extra = '') => { total++; console.log(`  ${cond ? '✓' : '✗'} ${msg}${cond || !extra ? '' : `  (${extra})`}`); if (!cond) fails++; };
@@ -82,9 +84,30 @@ await p.goto(`${base}/?floor=alpha`);
 await openAnn(p);
 const there = await links(p);
 ok(!there.includes('handback') && !there.includes('claude'), 'remotely, neither is drawn', JSON.stringify(there));
-ok(await p.evalJs(`fetch('./api/floor').then((r) => r.json()).then((j) => JSON.stringify(j.viewer))`) === '{"remote":true,"name":"Remote Owner"}', 'the floor payload says the viewer is remote, by name');
+ok(await p.evalJs(`fetch('./api/floor').then((r) => r.json()).then((j) => JSON.stringify(j.viewer))`) === JSON.stringify({ remote: true, name: 'Remote Owner', machine }), 'the floor payload says the viewer is remote, by name, and names the board\'s computer');
 ok(await k.evalJs(`fetch('./api/floor').then((r) => r.json()).then((j) => JSON.stringify(j.viewer))`) === '{"remote":false}', 'and at the keyboard, not');
+
+console.log('\nwhere the building is, said remotely');
+// The check made a second building above ("Remote"), so the header is
+// chips, then where they are. One building's label is test:service's row.
+await until(p, `!!document.querySelector('#building-pick .bld-at')`, 'the header says where the building is');
+const where = await p.evalJs(`document.getElementById('building-pick').textContent.replace(/\\s+/g, ' ').trim()`);
+ok(where.startsWith('Headquarters') && where.endsWith(`at ${machine}`), 'the header reads "Headquarters … at <the board\'s computer>"', where);
+ok(!(await k.evalJs(`document.getElementById('building-pick').textContent`)).includes(' at '), 'at the keyboard, no machine is named');
 await p.shot(`${shots}/relayed-floor.png`, null, { scale: 1 });
+
+console.log('\nthe board goes away under an open page');
+ok(boardPid > 0, 'the fixture named the board\'s pid');
+process.kill(boardPid, 'SIGTERM');
+await until(p, `!document.getElementById('board-down').classList.contains('hidden')`, 'the page says the board is gone', 15000);
+const down = await p.evalJs(`document.getElementById('board-down').textContent`);
+ok(/isn.t answering/.test(down) && /Nothing can be sent/.test(down), 'a line over the page says the board isn\'t answering and nothing can be sent', down);
+await until(p, `document.querySelector('#floor-panel [data-act="send"]').disabled`, 'Send goes dim');
+ok(await p.evalJs(`document.querySelector('#floor-panel [data-act="send"]').disabled`), 'ann\'s Send is dimmed');
+ok(await p.evalJs(`document.getElementById('p-text').placeholder`) === down, 'and the box says the same words', await p.evalJs(`document.getElementById('p-text').placeholder`));
+ok(await p.evalJs(`document.body.classList.contains('board-down')`), 'and the floor is dimmed');
+ok(await p.evalJs(`document.querySelector('#floor-panel .p-hint').textContent.trim()`) === '', 'the hint under the box guesses nothing about the desk\'s host', await p.evalJs(`document.querySelector('#floor-panel .p-hint').textContent`));
+await p.shot(`${shots}/relayed-board-down.png`, null, { scale: 1 });
 
 console.log(fails ? `\nFAIL · ${fails} of ${total} red` : `\nPASS · ${total} of ${total}`);
 process.exit(fails ? 1 : 0);

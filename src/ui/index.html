@@ -42,6 +42,11 @@
     </div>
   </header>
 
+  <!-- The board does not answer (its app quit, its computer offline, or a
+       session through the service ended): said here, over everything, and
+       nothing is sent until it is back (floor.js, boardDownWords). -->
+  <div id="board-down" class="board-down-bar hidden" role="status"></div>
+
   <main>
     <!--
       The floor. Sits alongside the board rather than replacing it: the board is

@@ -9,9 +9,9 @@
  * - With one building the header has no picker and every floor is on the
  *   floor, as before buildings.
  * - Settings ▸ Buildings: Add building "Lab", and the header grows a chip
- *   each. Main's Delete is dimmed (the default), and so is Lab's once a
+ *   each. Headquarters' Delete is dimmed (the default), and so is Lab's once a
  *   floor is in it. A taken name is refused in the section's own words.
- * - A floor's select moves it to Lab. On Main the floor shows alpha and
+ * - A floor's select moves it to Lab. On Headquarters the floor shows alpha and
  *   gamma only, and the totals line counts two floors. A click on the Lab
  *   chip shows beta alone, the address says ?building=, and a reload stays.
  * - The board view shows the same building's cards.
@@ -46,13 +46,13 @@ ok((await chips(p)).length === 0 && await p.evalJs(`getComputedStyle(document.ge
 console.log('\nSettings ▸ Buildings: add one');
 await p.click('#open-settings');
 await until(p, `!!document.querySelector('#set-buildings #building-new')`, 'Settings has a Buildings section');
-ok(await p.evalJs(`document.querySelector('[data-set="building-delete"]').disabled`), 'Main\'s Delete is dimmed: it is the default');
+ok(await p.evalJs(`document.querySelector('[data-set="building-delete"]').disabled`), 'Headquarters\' Delete is dimmed: it is the default');
 await p.evalJs(`document.querySelector('#building-new').focus()`);
 await p.type('Lab');
 await p.click('[data-set="building-create"]');
 await until(p, `document.querySelectorAll('#set-buildings [data-building-row]').length === 2`, 'the section lists two buildings');
 await until(p, `document.querySelectorAll('#building-pick [data-building]').length === 2`, 'the header grows a chip each');
-ok(JSON.stringify(await chips(p)) === '[["Main",true],["Lab",false]]', 'Main is lit, Lab beside it', JSON.stringify(await chips(p)));
+ok(JSON.stringify(await chips(p)) === '[["Headquarters",true],["Lab",false]]', 'Headquarters is lit, Lab beside it', JSON.stringify(await chips(p)));
 ok(await p.evalJs(`document.querySelectorAll('#set-buildings [data-set-floor-building]').length === 3`), 'each floor has a building select');
 await p.evalJs(`document.querySelector('#building-new').focus()`);
 await p.type('lab');
@@ -68,20 +68,20 @@ ok(await p.evalJs(`document.querySelector('[data-set="building-delete"][data-id=
 await p.shot(`${shots}/buildings-settings.png`, '#settings-dlg', { scale: 1 });
 await p.key('Escape');
 await until(p, `!document.getElementById('settings-dlg').open`, 'Settings closes');
-await until(p, `new Set([...document.querySelectorAll('#floor-rooms [data-channel]')].map((n) => n.dataset.channel)).size === 2`, 'Main\'s floor redraws without beta');
-ok(JSON.stringify(await rooms(p)) === '["alpha","gamma"]', 'Main shows alpha and gamma', JSON.stringify(await rooms(p)));
+await until(p, `new Set([...document.querySelectorAll('#floor-rooms [data-channel]')].map((n) => n.dataset.channel)).size === 2`, 'Headquarters\' floor redraws without beta');
+ok(JSON.stringify(await rooms(p)) === '["alpha","gamma"]', 'Headquarters shows alpha and gamma', JSON.stringify(await rooms(p)));
 ok(/^2 floors · /.test(await p.evalJs(`document.getElementById('floor-totals').textContent`)), 'and its totals count two floors', await p.evalJs(`document.getElementById('floor-totals').textContent`));
 await p.click(`#building-pick [data-building="${labId}"]`);
 await until(p, `new Set([...document.querySelectorAll('#floor-rooms [data-channel]')].map((n) => n.dataset.channel)).size === 1`, 'Lab draws one floor');
 ok(JSON.stringify(await rooms(p)) === '["beta"]', 'Lab shows beta alone', JSON.stringify(await rooms(p)));
-ok(JSON.stringify(await chips(p)) === '[["Main",false],["Lab",true]]', 'and its chip is lit', JSON.stringify(await chips(p)));
+ok(JSON.stringify(await chips(p)) === '[["Headquarters",false],["Lab",true]]', 'and its chip is lit', JSON.stringify(await chips(p)));
 ok(new URLSearchParams(await p.evalJs('location.search')).get('building') === labId, 'the address names the building', await p.evalJs('location.search'));
 ok(/^1 floor · /.test(await p.evalJs(`document.getElementById('floor-totals').textContent`)), 'the totals count its one floor', await p.evalJs(`document.getElementById('floor-totals').textContent`));
 await p.shot(`${shots}/buildings-lab.png`, null, { scale: 1 });
 await p.goto(await p.evalJs('location.href'));
 await until(p, `document.querySelectorAll('#building-pick [data-building]').length === 2 && document.querySelectorAll('#floor-rooms [data-channel]').length > 0`, 'the reload draws');
 await sleep(500);
-ok(JSON.stringify(await rooms(p)) === '["beta"]' && JSON.stringify(await chips(p)) === '[["Main",false],["Lab",true]]', 'a reload stays in Lab', JSON.stringify([await rooms(p), await chips(p)]));
+ok(JSON.stringify(await rooms(p)) === '["beta"]' && JSON.stringify(await chips(p)) === '[["Headquarters",false],["Lab",true]]', 'a reload stays in Lab', JSON.stringify([await rooms(p), await chips(p)]));
 
 console.log('\nthe board view is the same building');
 await p.click('[data-view="board"]');
@@ -92,7 +92,7 @@ ok(boardText.includes('beta') && !boardText.includes('alpha') && !boardText.incl
 await p.click(`#building-pick [data-building]:not([data-building="${labId}"])`);
 await sleep(1200);
 const boardMain = await p.evalJs(`document.getElementById('channels').innerText`);
-ok(boardMain.includes('alpha') && boardMain.includes('gamma') && !boardMain.includes('beta'), 'and Main\'s chip shows Main\'s', boardMain.slice(0, 120).replace(/\s+/g, ' '));
+ok(boardMain.includes('alpha') && boardMain.includes('gamma') && !boardMain.includes('beta'), 'and Headquarters\' chip shows its own', boardMain.slice(0, 120).replace(/\s+/g, ' '));
 
 console.log('\na rename shows on the chip');
 await p.click('#open-settings');

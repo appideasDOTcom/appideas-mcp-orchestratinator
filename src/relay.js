@@ -31,7 +31,8 @@ export const RELAY_SIG_HEADER = 'x-orch-relay-sig';
 /** At least 32 random bytes, which as hex is 64 characters and as base64url 43. */
 const SECRET_MIN = 43;
 const IAT_WINDOW_MS = 300_000;
-const ROLES = new Set(['owner']);
+const ROLES = new Set(['owner', 'guest']);
+const BUILDINGS_MAX = 200;
 
 /**
  * Actions that put something on the board machine's own screen: a terminal,
@@ -98,11 +99,109 @@ export function checkRelay({ headers, secret, now = Date.now() }) {
   if (!op || !name || !origin || typeof p.iat !== 'number' || typeof p.role !== 'string') {
     return refuse('relay_bad_signature', 'The relayed request\'s identity is missing a field (op, name, role, origin, iat).');
   }
-  if (!ROLES.has(p.role)) return refuse('relay_role', `This board serves the relayed role "owner" only, not "${p.role.slice(0, 20)}".`);
+  if (!ROLES.has(p.role)) return refuse('relay_role', `This board serves the relayed roles "owner" and "guest", not "${p.role.slice(0, 20)}".`);
+  // A guest carries the building ids its Key Card opens (board.relay v4). An
+  // id the board doesn't have opens nothing; a guest with none is malformed.
+  let buildings = null;
+  if (p.role === 'guest') {
+    if (!Array.isArray(p.buildings) || p.buildings.length > BUILDINGS_MAX || !p.buildings.every((b) => str(b, 64))) {
+      return refuse('relay_bad_signature', 'A guest\'s relayed identity is missing the buildings its card opens.');
+    }
+    buildings = [...new Set(p.buildings)];
+  }
   if (Math.abs(now - p.iat) > IAT_WINDOW_MS) return refuse('relay_stale', 'The relayed request was signed more than five minutes from this board\'s clock.');
   const reqOrigin = headers.origin;
   if (reqOrigin != null && reqOrigin !== origin) return refuse('relay_cross_origin', 'This request came from another site than the one the board was opened on.');
-  return { payload: { op, name, role: p.role, origin, iat: p.iat } };
+  return { payload: { op, name, role: p.role, origin, iat: p.iat, ...(buildings ? { buildings } : {}) } };
+}
+
+/**
+ * The desk actions only a desk's own operator takes (board.relay v4, "desk
+ * ownership"): its prompts, its stop sign, opening, reopening, moving,
+ * leaving or seating it, handing it to an editor or a terminal, its sign-in.
+ * Everyone in the building may message, nudge and meet it.
+ */
+export const OWN_ROUTES = new Set([
+  'POST /api/floor/permission', 'POST /api/floor/answer', 'POST /api/floor/interrupt',
+  'POST /api/floor/open', 'POST /api/floor/reopen', 'POST /api/floor/desk/move', 'POST /api/floor/desk/leave',
+  'POST /api/floor/desk/twin', 'POST /api/floor/handback', 'POST /api/floor/attach', 'POST /api/floor/claude',
+  'POST /api/floor/sessions', 'POST /api/floor/signin', 'POST /api/floor/rescan', 'POST /api/floor/read',
+]);
+
+/** Whose work a request asks for (board.relay v5): a guest's own op, or null for the owner's. */
+export const requesterOp = (req) => (req?.relay?.role === 'guest' ? req.relay.op : null);
+/** What a guest never reaches: the board's own administration and history across the owner's hosts. */
+const GUEST_DENY = [/^\/api\/admin(\/|$)/, /^\/api\/floor\/history(\/|$)/];
+/** Routes that act on a host by its id: a guest's must be its own (`<op>~…`). */
+const HOST_ID_ROUTES = /^\/api\/(host\/|floor\/(browse|pick|desk)$)/;
+/** A model or effort change is the desk's own operator's, like its other settings. */
+const SETTING_COMMAND = /^\s*\/(model|effort)\b/i;
+
+/** The channels a request names: body, query, a move's target, a stream's desks, a room's agents. */
+function channelsNamed(req) {
+  const out = [];
+  const add = (c) => { if (typeof c === 'string' && c.trim()) out.push(c.trim()); };
+  add(req.body?.channel); add(req.body?.to); add(req.query?.channel);
+  if (typeof req.query?.desks === 'string') {
+    try { for (const p of JSON.parse(req.query.desks)) if (Array.isArray(p)) add(p[0]); } catch { /* the route refuses it */ }
+  }
+  for (const a of Array.isArray(req.body?.agents) ? req.body.agents : []) add(a?.channel ?? (Array.isArray(a) ? a[0] : null));
+  if (/^\/(mcp|api\/ingest)(\/|$)/.test(req.path)) add(header(req, 'x-channel') ?? header(req, 'x-orchestratinator-channel') ?? req.body?.channel);
+  return out;
+}
+
+/**
+ * Who may do what, once the body is parsed (board.relay v4). Runs for every
+ * request, the keyboard's too: the owner at the keyboard cannot answer a
+ * guest's agent's prompt either.
+ */
+export function createScope({ store }) {
+  const requester = (req) => (req.relay?.role === 'guest' ? { op: req.relay.op, name: req.relay.name } : { op: null, name: req.relay?.name ?? null });
+  const inBuildings = (req, channel) => req.relay.buildings.includes(store.floorBuildings([channel]).get(channel));
+  return function scope(req, res, next) {
+    const what = `${req.method} ${req.path}`;
+    const me = requester(req);
+    const guest = req.relay?.role === 'guest';
+    const refuse = (status, code, error) => res.status(status).json({ error, code });
+    if (guest) {
+      if (GUEST_DENY.some((rx) => rx.test(req.path))) return refuse(403, 'relay_guest_scope', `A guest of this board does not reach ${req.path}: it is the board owner's.`);
+      if (HOST_ID_ROUTES.test(req.path)) {
+        const hid = req.body?.host_id ?? req.query?.host_id;
+        if (hid != null && !String(hid).startsWith(`${me.op}~`)) return refuse(403, 'relay_host_id', `A guest acts only on its own host (an id starting "${me.op}~"), not "${String(hid).slice(0, 40)}".`);
+        if (hid == null && /^\/api\/host\//.test(req.path)) return refuse(403, 'relay_host_id', 'A guest\'s host names itself on every call.');
+      }
+      for (const c of channelsNamed(req)) {
+        if (!inBuildings(req, c)) return refuse(403, 'relay_guest_scope', `The floor "${c}" is not in a building this guest's card opens.`);
+      }
+    }
+    // Work for a host is its own operator's to ask for (board.relay v5,
+    // desktop-dev's 4431): nobody else takes a desk on it, browses or picks
+    // its folders. Its own /api/host/* calls are the host itself.
+    if (HOST_ID_ROUTES.test(req.path) && !/^\/api\/host\//.test(req.path)) {
+      const hid = req.body?.host_id ?? req.query?.host_id;
+      if (hid != null) {
+        const owner = store.hostOperator(String(hid));
+        if ((owner.op ?? null) !== me.op) return refuse(403, 'host_not_yours', `That host is ${owner.op ? (owner.name ?? 'a guest') + '\'s' : (store.ownerName?.() ?? 'the board owner') + '\'s'}: only its own operator gives it work.`);
+      }
+    }
+    // A desk's own operator's actions, and an agent's or hook's identity.
+    const desk = (channel, agent) => (channel && agent ? store.deskOperator(String(channel), String(agent)) : null);
+    const notYours = (who) => refuse(403, 'desk_not_yours', `That desk is ${who.name ?? (who.op ? 'a guest\'s' : 'the board owner\'s')}: only its own operator can do that.`);
+    if (OWN_ROUTES.has(what) || (what === 'POST /api/floor/chat' && SETTING_COMMAND.test(String(req.body?.text ?? '')))) {
+      const who = desk(req.body?.channel, req.body?.agent);
+      if (who && who.op !== me.op && (who.op || me.op)) return notYours(who.op ? who : { op: null, name: store.ownerName?.() ?? null });
+    }
+    if (req.relay && /^\/(mcp|api\/ingest)(\/|$)/.test(req.path)) {
+      const ch = header(req, 'x-channel') ?? header(req, 'x-orchestratinator-channel') ?? req.body?.channel;
+      const ag = header(req, 'x-agent') ?? header(req, 'x-orchestratinator-agent') ?? req.body?.agent;
+      const who = desk(ch, ag);
+      if (who && who.op !== me.op) return notYours(who.op ? who : { op: null, name: store.ownerName?.() ?? null });
+      // A guest's agent arriving as a name nobody holds is that guest's from
+      // now on (board.relay v6), so a revoke can find it later.
+      if (!who && guest && ch && ag) store.setDeskOperator?.(String(ch), String(ag), me.op, me.name);
+    }
+    return next();
+  };
 }
 
 export function createRelay({ env = process.env } = {}) {

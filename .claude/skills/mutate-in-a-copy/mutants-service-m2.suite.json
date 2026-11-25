@@ -1,0 +1,219 @@
+[
+ [
+  "guest: no buildings accepted",
+  "service",
+  "src/relay.js",
+  "    if (!Array.isArray(p.buildings) || p.buildings.length > BUILDINGS_MAX || !p.buildings.every((b) => str(b, 64))) {",
+  "    if (false) {"
+ ],
+ [
+  "guest: admin routes reached",
+  "service",
+  "src/relay.js",
+  "      if (GUEST_DENY.some((rx) => rx.test(req.path))) return refuse(403, 'relay_guest_scope',",
+  "      if (false) return refuse(403, 'relay_guest_scope',"
+ ],
+ [
+  "guest: any host id",
+  "service",
+  "src/relay.js",
+  "        if (hid != null && !String(hid).startsWith(`${me.op}~`)) return refuse(403, 'relay_host_id',",
+  "        if (false) return refuse(403, 'relay_host_id',"
+ ],
+ [
+  "guest: floors outside the card reached",
+  "service",
+  "src/relay.js",
+  "        if (!inBuildings(req, c)) return refuse(403, 'relay_guest_scope',",
+  "        if (false) return refuse(403, 'relay_guest_scope',"
+ ],
+ [
+  "guest: a stream's desks not read",
+  "service",
+  "src/relay.js",
+  "    try { for (const p of JSON.parse(req.query.desks)) if (Array.isArray(p)) add(p[0]); } catch { /* the route refuses it */ }",
+  "    try { void 0; } catch { /* the route refuses it */ }"
+ ],
+ [
+  "guest: x-channel not read on /mcp",
+  "service",
+  "src/relay.js",
+  "  if (/^\\/(mcp|api\\/ingest)(\\/|$)/.test(req.path)) add(header(req, 'x-channel')",
+  "  if (false) add(header(req, 'x-channel')"
+ ],
+ [
+  "v5: work for another's host taken",
+  "service",
+  "src/relay.js",
+  "        if ((owner.op ?? null) !== me.op) return refuse(403, 'host_not_yours',",
+  "        if (false) return refuse(403, 'host_not_yours',"
+ ],
+ [
+  "ownership: anyone stops any desk",
+  "service",
+  "src/relay.js",
+  "      if (who && who.op !== me.op && (who.op || me.op)) return notYours(",
+  "      if (false) return notYours("
+ ],
+ [
+  "ownership: an agent claims another's desk",
+  "service",
+  "src/relay.js",
+  "      if (who && who.op !== me.op) return notYours(who.op ? who : { op: null, name: store.ownerName?.() ?? null });\n    }\n    return next();",
+  "      void who;\n    }\n    return next();"
+ ],
+ [
+  "ownership: an unhosted desk is the owner's",
+  "service",
+  "src/db.js",
+  "      return r ? { op: r.operator ?? null, name: r.operator_name ?? null } : null;",
+  "      return { op: r?.operator ?? null, name: r?.operator_name ?? null };"
+ ],
+ [
+  "ownership: read is not the desk's own",
+  "service",
+  "src/relay.js",
+  "'POST /api/floor/rescan', 'POST /api/floor/read',",
+  "'POST /api/floor/rescan',"
+ ],
+ [
+  "attribution: never added",
+  "service",
+  "src/floor.js",
+  "  return { text: `From ${name}:\\n\\n${text}` };",
+  "  return { text };"
+ ],
+ [
+  "attribution: on the operator's own messages too",
+  "service",
+  "src/floor.js",
+  "  if ((fromOp ?? null) === (deskOp ?? null)) return { text };",
+  "  if (false) return { text };"
+ ],
+ [
+  "attribution: commands let through",
+  "service",
+  "src/floor.js",
+  "  if (command) {\n    const whose",
+  "  if (false) {\n    const whose"
+ ],
+ [
+  "attribution: the page gets the raw line",
+  "service",
+  "src/floor.js",
+  "  return m ? { ...t, from: m[1], text: m[2] } : t;",
+  "  return t;"
+ ],
+ [
+  "hello: a guest names the owner",
+  "service",
+  "src/floor.js",
+  "    if (req.relay?.role !== 'owner') return res.status(403).json({ error: 'Only the board owner",
+  "    if (false) return res.status(403).json({ error: 'Only the board owner"
+ ],
+ [
+  "payload: a guest sees every floor",
+  "service",
+  "src/floor.js",
+  "      out.channels = out.channels.filter((c) => keep.has(c.channel));",
+  "      void keep;"
+ ],
+ [
+  "payload: a guest sees the server meta",
+  "service",
+  "src/web.js",
+  "      state.server = { version: state.server.version, now: state.server.now };",
+  ""
+ ],
+ [
+  "payload: a guest gets the prompts",
+  "service",
+  "src/web.js",
+  "res.json({ prompts: guestOf(req) ? [] : store.listSavedPrompts() });",
+  "res.json({ prompts: store.listSavedPrompts() });"
+ ],
+ [
+  "host: a guest files a desk outside its card",
+  "service",
+  "src/floor.js",
+  "    if (guest && !guestFloors(store, guest, [channel]).has(channel)) return false;",
+  ""
+ ],
+ [
+  "host: a guest takes the owner's desk",
+  "service",
+  "src/floor.js",
+  "    return (store.deskOperator(channel, agent)?.op ?? null) === (guest?.op ?? null);",
+  "    return true;"
+ ],
+ [
+  "host: a host's operator never set",
+  "service",
+  "src/floor.js",
+  "    store.setHostOperator?.(hostId, hostGuest?.op ?? null, hostGuest?.name ?? null);",
+  ""
+ ],
+ [
+  "folders: every host's",
+  "service",
+  "src/floor.js",
+  "    const hosts = store.listHosts().filter((h) => (h.operator ?? null) === requesterOp(req)).map((h) => {",
+  "    const hosts = store.listHosts().map((h) => {"
+ ],
+ [
+  "access: a guest changes its own",
+  "service",
+  "src/floor.js",
+  "    if (req.relay?.role !== 'owner') return res.status(403).json({ error: 'Only the board owner\\'s relayed request changes a guest\\'s access.'",
+  "    if (false) return res.status(403).json({ error: 'Only the board owner\\'s relayed request changes a guest\\'s access.'"
+ ],
+ [
+  "access: desks still in the card dropped too",
+  "service",
+  "src/floor.js",
+  "      if (guestFloors(store, keep, [d.channel]).has(d.channel)) continue;",
+  ""
+ ],
+ [
+  "access: hosts left live",
+  "service",
+  "src/floor.js",
+  "    if (!still.length) for (const h of hosts) { store.setHostState(h, 'offline'); store.retireHost(h); }",
+  ""
+ ],
+ [
+  "note: one operator named for a mixed room",
+  "service",
+  "src/floor.js",
+  "  const several = ops.length > 1;",
+  "  const several = false;"
+ ],
+ [
+  "access: a dropped guest agent stays present",
+  "service",
+  "src/floor.js",
+  "      closeSessionsFor?.({ channel: d.channel, agent: d.agent });\n      store.retireAgent(d.channel, d.agent);",
+  ""
+ ],
+ [
+  "access: a hostless guest desk is not found",
+  "service",
+  "src/floor.js",
+  "...store.listHostedDesks().filter((x) => hosts.includes(x.host_id)), ...store.desksOfOperator(op)]",
+  "...store.listHostedDesks().filter((x) => hosts.includes(x.host_id))]"
+ ],
+ [
+  "desk_operators: never read",
+  "service",
+  "src/db.js",
+  "      return k ? { op: k.operator, name: k.name ?? null } : null;",
+  "      return null;"
+ ],
+ [
+  "desk_operators: a guest agent's new name not recorded",
+  "service",
+  "src/relay.js",
+  "      if (!who && guest && ch && ag) store.setDeskOperator?.(String(ch), String(ag), me.op, me.name);",
+  ""
+ ]
+]
