@@ -458,6 +458,16 @@ export function openDb(path) {
   // shipped to the live instance without it.
   addColumn(db, 'desk_twins', 'start_cursor', 'INTEGER NOT NULL DEFAULT 0');
 
+  // Where a guest's desk starts reading: the floor's newest message when the
+  // name was first that operator's. A name is the board's whole idea of who
+  // an agent is, and a guest's desk can take a name an earlier guest's desk
+  // left (a revoke frees it). Read from 0, the new desk was handed the old
+  // one's mail and a meeting room's contained broadcasts, which name their
+  // audience by agent (desktop-dev's M3 walk, 2026-11-25: a new partner's
+  // partner-agent read a room message from an earlier walk's). The owner's
+  // desks have no row and read as they always have.
+  addColumn(db, 'desk_operators', 'start_cursor', 'INTEGER NOT NULL DEFAULT 0');
+
   // Retired = the operator has taken this agent off the board. Deliberately a
   // flag and not a DELETE: the row is recreated by `touchAgent` the moment the
   // agent connects again, so a delete would be undone by the next reconnect and
@@ -950,11 +960,13 @@ export function makeStore(db) {
        WHERE channel = @channel AND id = @id AND status != 'done'`
     ),
     touchAgent: db.prepare(
-      // A second session's row starts at its link's start_cursor (see the
-      // column); anybody else's at 0, as it always did.
+      // A second session's row starts at its link's start_cursor, and a
+      // guest's desk at its desk_operators one (see the columns); anybody
+      // else's at 0, as it always did.
       `INSERT INTO agents (channel, agent, last_seen, last_action, last_action_at, poll_cursor)
        VALUES (@channel, @agent, datetime('now'), @action, datetime('now'),
-               COALESCE((SELECT start_cursor FROM desk_twins WHERE channel = @channel AND agent = @agent), 0))
+               MAX(COALESCE((SELECT start_cursor FROM desk_twins WHERE channel = @channel AND agent = @agent), 0),
+                   COALESCE((SELECT start_cursor FROM desk_operators WHERE channel = @channel AND agent = @agent), 0)))
        ON CONFLICT(channel, agent) DO UPDATE SET
          last_seen      = datetime('now'),
          last_action    = COALESCE(@action, last_action),
@@ -965,7 +977,8 @@ export function makeStore(db) {
     setAgentStatus: db.prepare(
       `INSERT INTO agents (channel, agent, last_seen, status, status_detail, status_at, status_expires_at, poll_cursor)
        VALUES (@channel, @agent, datetime('now'), @status, @detail, datetime('now'), datetime('now', @ttl),
-               COALESCE((SELECT start_cursor FROM desk_twins WHERE channel = @channel AND agent = @agent), 0))
+               MAX(COALESCE((SELECT start_cursor FROM desk_twins WHERE channel = @channel AND agent = @agent), 0),
+                   COALESCE((SELECT start_cursor FROM desk_operators WHERE channel = @channel AND agent = @agent), 0)))
        ON CONFLICT(channel, agent) DO UPDATE SET
          last_seen         = datetime('now'),
          status            = @status,
@@ -2398,8 +2411,27 @@ export function makeStore(db) {
       const k = db.prepare('SELECT operator, name FROM desk_operators WHERE channel = ? AND agent = ?').get(channel, agent);
       return k ? { op: k.operator, name: k.name ?? null } : null;
     },
-    setDeskOperator: (channel, agent, op, name) => db.prepare(`INSERT INTO desk_operators (channel, agent, operator, name) VALUES (?, ?, ?, ?)
-      ON CONFLICT(channel, agent) DO UPDATE SET operator = excluded.operator, name = excluded.name, updated_at = datetime('now')`).run(channel, agent, op, name ?? null).changes,
+    /**
+     * The guest a desk is. Called on every event batch from a guest's host,
+     * so the same operator again only refreshes the name. A name that becomes
+     * this operator's (new, or an earlier operator's) starts reading at the
+     * floor's newest message: the row's start_cursor, and the agents row's
+     * cursor moved up to it, so its unread count and its polls begin there.
+     */
+    setDeskOperator: (channel, agent, op, name) => {
+      const was = db.prepare('SELECT operator FROM desk_operators WHERE channel = ? AND agent = ?').get(channel, agent);
+      if (was && was.operator === op) {
+        return db.prepare("UPDATE desk_operators SET name = ?, updated_at = datetime('now') WHERE channel = ? AND agent = ?").run(name ?? null, channel, agent).changes;
+      }
+      const start = q.messageHighWater.get().id;
+      const n = db.prepare(`INSERT INTO desk_operators (channel, agent, operator, name, start_cursor) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(channel, agent) DO UPDATE SET operator = excluded.operator, name = excluded.name,
+          start_cursor = excluded.start_cursor, updated_at = datetime('now')`).run(channel, agent, op, name ?? null, start).changes;
+      q.advancePollCursor.run({ channel, agent, cursor: start });
+      return n;
+    },
+    /** Where a guest's desk starts reading (0 for any other desk). */
+    operatorStartOf: (channel, agent) => db.prepare('SELECT start_cursor FROM desk_operators WHERE channel = ? AND agent = ?').get(channel, agent)?.start_cursor ?? 0,
     clearDeskOperator: (channel, agent) => db.prepare('DELETE FROM desk_operators WHERE channel = ? AND agent = ?').run(channel, agent).changes,
     desksOfOperator: (op) => db.prepare('SELECT channel, agent FROM desk_operators WHERE operator = ?').all(op),
     /** A host whose operator's access ended (POST /api/relay/access): unheard from as of now, so it reads offline at once, not after the liveness window. Its next registration, if its access returns, brings it back. */

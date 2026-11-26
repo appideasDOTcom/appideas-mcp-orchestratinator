@@ -38,19 +38,19 @@ one exchange and buys you the chance to add the detail this particular agent
 needs, and the agent the chance to raise something before it is committed to an
 approach.
 
-**Holding questions is not brushing them off.** Roughly four in five of the
-questions an agent has at the start get answered by doing the work —
-organically, at the moment they matter, at no cost to anyone. The fifth is the
-real one, and it arrives later carrying the context that makes it cheap to
-answer and hard to misread. Answering all of them up front inverts that: it
-spends the most time on the questions with the least information behind them.
-The playbook makes the same point in its own voice under **After reading this,
-hold your questions**, with the list of the ones that get asked every single
-time and need not be.
+**Holding questions isn't brushing them off.** Most of an agent's early
+questions answer themselves once it starts working. The ones that don't come
+back later, with the context that makes them quick to answer. The playbook
+says the same under **After reading this, hold your questions**.
 
 **How to tell it took.** The agent should come back having run `whoami` and
 `poll_messages` rather than asking you what it is called, and should set a
 status, so its sign stops reading `idle`. Once it is working, it addresses
 messages to a name instead of broadcasting at the room. If none of that
 changed, it read the playbook as background rather than as instructions — say
-so plainly and it will correct.
+so plainly and it will correct. When the floor wakes an agent for waiting
+work, it says `nudge`; the playbook tells the agent what that means.
+
+<img src="images/floor-desk.png" width="222" alt="A desk whose sign shows a status the agent set itself">
+
+*An agent that read the playbook sets its own status, and its desk sign says so.*

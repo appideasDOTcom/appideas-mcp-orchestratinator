@@ -436,6 +436,55 @@ try {
     assert(!['desk_not_yours', 'relay_guest_scope'].includes(fresh), `a name no desk holds, on its floor: let through (${fresh})`);
   }
 
+  console.log('\nM3: a guest\'s desk starts reading where its name became that guest\'s');
+  {
+    // desktop-dev's walk (2026-11-25): a new partner's partner-agent read a
+    // meeting room's broadcast from an earlier walk's desk of the same name.
+    // A name is the board's whole idea of who an agent is, so a guest's desk
+    // under a name the board already knows is handed nothing from before it.
+    const session = async (ch, ag, p) => {
+      const h = (sid) => ({ 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'x-orchestratinator-key': KEY, 'x-channel': ch, 'x-agent': ag, ...(p ? sign(p) : {}), ...(sid ? { 'mcp-session-id': sid } : {}) });
+      const init = await fetch(`${B}/mcp`, { method: 'POST', headers: h(), body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 't', version: '1' } } }) });
+      const sid = init.headers.get('mcp-session-id'); await init.text();
+      let id = 1;
+      return async (name, args = {}) => {
+        const r = await fetch(`${B}/mcp`, { method: 'POST', headers: h(sid), body: JSON.stringify({ jsonrpc: '2.0', id: ++id, method: 'tools/call', params: { name, arguments: args } }) });
+        const t = await r.text();
+        const line = t.split('\n').find((l) => l.startsWith('data:'));
+        const msg = JSON.parse(line ? line.slice(5) : t);
+        return JSON.parse(msg.result?.content?.[0]?.text ?? 'null') ?? msg;
+      };
+    };
+    const dev = await session('open-floor', 'dev');
+    // reuse was somebody's before: it read, then was sent more it never read.
+    const before = await session('open-floor', 'reuse');
+    await before('poll_messages', {});
+    await dev('send_message', { to: 'reuse', body: 'for the reuse that was here before' });
+    await dev('send_message', { body: 'a broadcast from before' });
+    const bodies = (r) => (r.messages ?? []).map((m) => m.body);
+    const unreadOf = async (ag) => (await (await fetch(`${B}/api/state`)).json()).channels.find((c) => c.channel === 'open-floor')?.agents?.find((a) => a.agent === ag)?.unread_list?.length ?? null;
+    eq(await unreadOf('reuse'), 2, 'the fixture: the name has two unread on the board');
+    const gail = await session('open-floor', 'reuse', guest());
+    // Read before any poll: a poll writes its own cursor down.
+    eq(await unreadOf('reuse'), 0, 'once a guest\'s agent connects under it, the board counts none of it unread for the desk');
+    const fresh = await session('open-floor', 'gnew', guest());
+    eq(await unreadOf('gnew'), 0, 'nor for a guest\'s agent under a name new to the board, which starts at the newest message too');
+    eq(bodies(await fresh('poll_messages', {})), [], 'and is handed nothing from before');
+    const first = await gail('poll_messages', {});
+    eq(bodies(first), [], 'the guest\'s desk under that name is handed none of it, with no since');
+    eq(bodies(await gail('poll_messages', { since: 0 })), [], 'nor with since 0');
+    await dev('send_message', { to: 'reuse', body: 'for Gail\'s reuse' });
+    eq(bodies(await gail('poll_messages', {})), ['for Gail\'s reuse'], 'what is sent to it after is its own');
+    // The same guest again (its host's events name the desk on every batch)
+    // keeps where it started.
+    await dev('send_message', { to: 'reuse', body: 'kept' });
+    await fetch(`${B}/api/host/events`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-orchestratinator-key': KEY, ...sign(guest()) }, body: JSON.stringify({ host_id: 'op_g~mac', events: [{ type: 'state', channel: 'open-floor', agent: 'reuse', state: 'idle' }] }) });
+    eq(bodies(await gail('poll_messages', { since: first.cursor })), ['for Gail\'s reuse', 'kept'], 'the same guest\'s host naming the desk again moves nothing: mail sent meanwhile is still there');
+    // The owner's own agents read as they always have.
+    const own = await session('open-floor', 'ownnew');
+    assert(bodies(await own('poll_messages', {})).includes('a broadcast from before'), 'an owner\'s agent new to the floor still reads its earlier broadcasts');
+  }
+
   console.log('\nM3: an agent sends another a file (board.files)');
   {
     const UP = await import('../host/uploads.js');
@@ -534,7 +583,7 @@ try {
     eq(back.status, 200, 'after a renewal, the guest\'s host registers again');
     eq((await floorDesk('gdev'))?.hosted?.live, true, 'and gdev is back, live, without being taken again');
     const gone = await access({ op: 'op_g', buildings: [] }, owner());
-    eq([gone.status, gone.body.dropped.map((d) => d.agent).sort(), gone.body.hosts_offline], [200, ['gdev', 'ghost', 'newcomer'], ['op_g~mac']], 'no card left: its desks leave the floor (the hosted one, and those it was known by with no host) and its host goes offline');
+    eq([gone.status, gone.body.dropped.map((d) => d.agent).sort(), gone.body.hosts_offline], [200, ['gdev', 'ghost', 'gnew', 'newcomer', 'reuse'], ['op_g~mac']], 'no card left: its desks leave the floor (the hosted one, and those it was known by with no host) and its host goes offline');
     eq((await ghostLive())?.live ?? false, false, 'ghost no longer reads live: its sessions are ended');
     const own = await json(await fetch(`${B}/api/floor/desk`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ host_id: 'h-own', path: '/o/ghost', channel: 'open-floor', agent: 'ghost' }) }));
     assert(own.body?.code !== 'desk_not_yours', 'and its name is free again: a take of it is no longer refused as the guest\'s (the M3 walk, b)', JSON.stringify(own.body));

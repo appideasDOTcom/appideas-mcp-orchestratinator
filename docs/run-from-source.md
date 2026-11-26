@@ -178,6 +178,22 @@ host's log says at startup which desk it could not read a key from.
 Open <http://localhost:8787/> in a browser. The board/floor switch is top
 right; every desk you wired up should be there.
 
+## Keeping it current
+
+On a source install, the header shows **Update available** when the branch the
+board follows has a commit this build lacks; it checks GitHub once a day.
+**Update** says what it will interrupt, then the host on the board's machine
+fetches the commit, rebuilds the server, updates the plugin when its hooks
+changed, and restarts itself, and the page reloads onto the new build. An
+update is refused, in words, when the clone has local changes or is not on the
+followed branch. One that stops after the server was rebuilt (the plugin
+update failed, say) leaves **Update stopped** in the header, and **Finish the
+update** runs what is left. **Settings** (⚙) turns the daily check off,
+switches to the development version (`develop` instead of `main`), and has
+**Check now**. The page's Update restarts a host that launchd runs (macOS). On
+Windows, pull the clone and run `host\install.ps1` again, which stops the
+running host cleanly and starts the new one.
+
 ## Useful commands
 
 ```bash

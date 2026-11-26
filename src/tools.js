@@ -179,7 +179,11 @@ export function registerTools(server, { store, context, files = null }) {
       // `since` it sends: its first poll, with none, used to hand it the
       // floor's oldest hundred broadcasts, which its agent's first desk has
       // (QA, PR #57 finding 2; desk_twins.start_cursor in src/db.js).
-      const since = Math.max(ahead ? store.pollCursorOf(channel, agent) : asked, store.twinOf(channel, agent)?.start_cursor ?? 0);
+      // A guest's desk the same, from when its name became that guest's
+      // (desk_operators.start_cursor): a name an earlier guest's desk left
+      // is not handed that desk's mail.
+      const since = Math.max(ahead ? store.pollCursorOf(channel, agent) : asked,
+        store.twinOf(channel, agent)?.start_cursor ?? 0, store.operatorStartOf?.(channel, agent) ?? 0);
       const rows = store.pollMessages(channel, agent, since, args.limit ?? 100);
       const messages = rows.map((r) => ({ ...r, body: safeParse(r.body) }));
       const cursor = messages.length ? messages[messages.length - 1].id : since;
