@@ -209,3 +209,10 @@ costmo's decisions, by AskUserQuestion:
 Built on the board: board.files. It was proven on a real Claude Code with
 `.claude/skills/measure-a-real-window/files-e2e.mjs` (10 of 10): a real
 agent used `send_file`, and the receiving agent opened the delivered path.
+
+## Where M3 stood when the round paused (2026-11-26 03:00Z)
+
+- **Proven, live on https://orchestratinator-dev.ngrok.dev:** service.tunnel v16. Real SendGrid email: the key is checked at startup, and every send logs its outcome and message id. Sign-in by email works for any address (decision 31): a link sent to a real inbox (`.claude/skills/measure-a-real-window/real-inbox.mjs`), its page 200, and the redeem made the account (`new_account: true`). The tunnel is part of `make dev`.
+- **Built, not yet walked by a person's path:** desktop-dev's rebuilt Settings ▸ Service pane (email + **Email link**, a code box, a name only for an invitation, a name prompt for a new account). costmo stopped at try-m3.md step 7 on the old pane.
+- **Next, before costmo sees anything:** walk try-m3.md exactly as written, in the real app, with real-inbox addresses, a screenshot of every screen judged as he would (4718). desktop-dev's session needs costmo to allow real-inbox.mjs. Then a fresh reader, then costmo's Mac Mini walk.
+- **Also done tonight:** a guest's desk starts reading at the newest message when its name becomes that guest's (desk_operators.start_cursor; test:service, mutants-guest-cursor.suite.json). "Get the app" on staging's /orchestratinator/.
