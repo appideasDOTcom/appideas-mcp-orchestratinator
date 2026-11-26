@@ -201,6 +201,11 @@ costmo's decisions, by AskUserQuestion:
 - **26. Already signed in.** A one-click "Continue as <name>" screen.
 - **27. The store's open-source section.** The privacy promise is scoped to the free app. With the service, the connection passes through the relay, which stores and logs nothing. The designer reviews the wording later.
 
+- **28. An invitation is one email.** The owner invites by address. The invitee's appideas.com account is made silently when they accept, and the app does the rest. Nobody visits a website (service.tunnel v14).
+- **29. Keys stay in the app.** "Replace this computer's Key" in Settings. Nobody goes to a site to change one.
+- **30. Signing in by email.** An emailed link or code. The browser sign-in is kept as a second way.
+- **31. Signing in by email works for any address** (costmo, 2026-11-25, on his walk: "'You had no account at the staging site' is an odd failure to have when the feature requires creating an account"). An address with no account gets the email too, and the account is made when the link is used, as joining does. It replaces 30's "a known address gets one email". The service still never says in its answer whether an account existed.
+
 Built on the board: board.files. It was proven on a real Claude Code with
 `.claude/skills/measure-a-real-window/files-e2e.mjs` (10 of 10): a real
 agent used `send_file`, and the receiving agent opened the delivered path.
