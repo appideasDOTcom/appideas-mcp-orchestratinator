@@ -38,11 +38,8 @@ isn't touched.
 
 ## Before you start (this Mac, once)
 
-1. **The live address.** In a Terminal of your own, in
-   `orchestratinator-service`:
-   `make dev-tunnel DEV_PUBLIC=orchestratinator-dev.ngrok.dev`
-   Leave it running for the whole walk. If you close it,
-   https://orchestratinator-dev.ngrok.dev stops answering.
+1. **The live address** is the agents' to keep running: nothing for you to
+   do. If https://orchestratinator-dev.ngrok.dev ever doesn't answer, say so.
 2. **Email.** Make `~/.config/orchestratinator/sendgrid.env` with two lines:
 
    ```sh
