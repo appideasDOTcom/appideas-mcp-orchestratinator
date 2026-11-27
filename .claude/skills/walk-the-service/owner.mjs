@@ -1,7 +1,8 @@
 // coordinator's walk, part 1: the owner turns sharing on and invites a real address.
-import { pane, shot, urls, browserSignIn } from './lib.mjs';
+import { pane, shot, urls, browserSignIn, tab } from './lib.mjs';
 const [port, name, invitee] = process.argv.slice(2);
 const o = await pane(Number(port));
+await tab(o, 'sharing');
 await o.getByTestId('settings-sharing-on').waitFor({ timeout: 90000 });
 await shot(o, 'c01-owner-fresh');
 const before = urls(name).length;

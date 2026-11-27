@@ -47,6 +47,18 @@ export async function pane(port) {
   await p.waitForTimeout(1200);
   return p;
 }
+/** Settings is in tabs since 2026-11-27 (General | Sharing | About): the person's click on one, as a step needs it. */
+export async function tab(p, name) {
+  await p.getByTestId(`settings-tab-${name}`).click();
+  await p.getByTestId(`settings-panel-${name}`).waitFor({ state: 'visible', timeout: 10000 });
+  await p.waitForTimeout(500);
+  return p;
+}
+/** The board's own settings view under the app's rows (?settings=1&section=…), as a page of its own over CDP. */
+export async function boardView(port, section) {
+  const a = await app(port);
+  return a.find((u) => u.includes('settings=1') && (!section || u.includes(`section=${section}`)), 20000);
+}
 /** A full-page shot of the pane, and what it says, for the record. */
 export async function shot(p, label) {
   await p.waitForTimeout(600);

@@ -1,7 +1,8 @@
 // the invitee: a fresh app, the code pasted as a person copies it from an email (with spaces around), Join.
-import { pane, shot } from './lib.mjs';
+import { pane, shot, tab } from './lib.mjs';
 const [port, code] = process.argv.slice(2);
 const p = await pane(Number(port));
+await tab(p, 'sharing');
 await p.getByTestId('settings-service-code').waitFor({ timeout: 60000 });
 await shot(p, 'c12-invitee-fresh');
 await p.getByTestId('settings-service-code').fill(`   ${code}\n`);

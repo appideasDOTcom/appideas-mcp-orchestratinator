@@ -1,9 +1,10 @@
 // the invitee presses Open: the owner's floor should come up in a window of the invitee's own app.
-import { app, SHOTS, pane, urls } from './lib.mjs';
+import { app, SHOTS, pane, urls, tab } from './lib.mjs';
 
 const [port, name] = process.argv.slice(2);
 const a = await app(Number(port));
 const p = await pane(Number(port));
+await tab(p, 'sharing');
 const before = a.pages().map((x) => x.url());
 const ub = urls(name).length;
 await p.getByRole('button', { name: /^open$/i }).first().click();
