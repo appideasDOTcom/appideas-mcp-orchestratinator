@@ -86,7 +86,12 @@ const roomId = Number(new URLSearchParams(await m.evalJs('location.search')).get
 ok(await m.evalJs(`getComputedStyle(document.querySelector('.topbar')).display === 'none' && getComputedStyle(document.querySelector('#floor-rooms')).display === 'none'`),
   'no top bar and no rooms in it');
 ok(!/old answer|old question/.test(await text(m, '#p-turns')), 'the transcript starts now: nothing a desk said before it joined');
-ok(workSince(w0).length === 0, 'opening the room typed into nobody');
+// Since 2026-11-19 each desk is sent the room's notice as it enters
+// (roomNoticeText); that is the only thing opening may type.
+const opened = workSince(w0);
+const notices = opened.filter((w) => w.kind === 'chat' && /^<meeting-room>/.test(w.payload?.text ?? ''));
+ok(opened.length === notices.length && JSON.stringify(notices.map((w) => w.agent).sort()) === '["bo","cy","dee"]',
+  'opening the room typed nothing but the room\'s notice, once to each desk', JSON.stringify(opened.map((w) => [w.kind, w.agent, String(w.payload?.text ?? '').slice(0, 30)])));
 
 // Opening the room is an action sent, so the selection closes itself
 // (costmo, 2026-11-14) and nothing is left on the room: every desk was reached.
@@ -393,6 +398,20 @@ ok(await lit() === '["bo"]', 'and Bo is still the only name lit after it', await
 await m.waitFor(`(() => { const n = [...document.querySelectorAll('#p-turns .m-msg')].find((x) => x.querySelector('.t-body')?.textContent === '/compact'); return n && /done in/.test(n.textContent); })()`, { timeout: 8000 }).catch(() => {});
 msg = await msgNode(m, '/compact');
 ok(msg?.delivs.join('|') === "Bo /compact — done in bo's window" && !msg.pending, 'the command\'s receipt stands under it, in the window\'s words', JSON.stringify(msg));
+// costmo, 2026-11-27: a /compact or /btw sent from a room stood at the foot
+// of the transcript for days, under everything said after it, and /compact's
+// receipt kept its first word ("compacting") after the compaction ended.
+await hostEv([{ type: 'receipt', channel: 'lab', agent: 'bo', command: 'compact', said: 'Compacted', text: '/compact', session_id: 'sess-bo', compacting: false, compacted: true }]);
+await m.waitFor(`(() => { const n = [...document.querySelectorAll('#p-turns .m-msg')].find((x) => x.querySelector('.t-body')?.textContent === '/compact'); return n && /Compacted/.test(n.textContent); })()`, { timeout: 8000 }).catch(() => {});
+msg = await msgNode(m, '/compact');
+ok(msg?.delivs.join('|') === 'Bo Compacted', 'a receipt in two parts: the room follows it to the last word', JSON.stringify(msg));
+await hostEv([{ type: 'turn', channel: 'lab', agent: 'bo', session_id: 'sess-bo', role: 'assistant', text: 'said after the compact', at: new Date().toISOString(), uuid: 'after-compact-1' }]);
+await m.waitFor(`[...document.querySelectorAll('#p-turns .t-body')].some((x) => x.textContent === 'said after the compact')`, { timeout: 8000 }).catch(() => {});
+const cmdOrder = JSON.parse(await m.evalJs(`JSON.stringify((() => {
+  const bodies = [...document.querySelectorAll('#p-turns .t-body')].map((x) => x.textContent);
+  return { cmd: bodies.indexOf('/compact'), after: bodies.indexOf('said after the compact'), n: bodies.length };
+})())`));
+ok(cmdOrder.cmd >= 0 && cmdOrder.after > cmdOrder.cmd, 'and the command scrolls with the transcript: what the desk said after it is drawn below it, not above', JSON.stringify(cmdOrder));
 
 console.log('\na question form, answered in the room');
 const { spawn } = await import('node:child_process');

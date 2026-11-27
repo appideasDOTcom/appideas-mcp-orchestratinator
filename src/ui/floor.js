@@ -6007,15 +6007,27 @@
    *              its known limit: an error turn names no message)
    */
   function meetingEntry(e, text, turns, delivery) {
-    if (!['line', 'queued'].includes(e.state)) return e;
     const words = meetSquash(text);
-    for (const t of [...(turns ?? [])].sort((a, b) => a.id - b.id)) {
+    // A command's receipt can come in two parts: /compact says "compacting"
+    // as it starts and "Compacted" when it ends (host/desk.js). The room
+    // keeps following the desk's receipt for it, or it read "compacting"
+    // two days on (costmo, 2026-11-27).
+    if (e.state === 'done') {
+      return delivery?.state === 'done' && delivery.said && delivery.said !== e.words && meetSquash(delivery.text).includes(words)
+        ? { ...e, words: delivery.said } : e;
+    }
+    if (!['line', 'queued'].includes(e.state)) return e;
+    const sorted = [...(turns ?? [])].sort((a, b) => a.id - b.id);
+    for (const t of sorted) {
       if (t.id <= (e.base ?? 0)) continue;
       if (t.role === 'user' && meetSquash(t.text).includes(words)) return { ...e, state: 'recorded', turn: t.id };
-      if (t.role === 'error') return { ...e, state: 'failed', words: t.text || 'the host could not deliver it' };
+      if (t.role === 'error') return { ...e, state: 'failed', words: t.text || 'the host could not deliver it', at: t.id };
     }
     if (delivery && meetSquash(delivery.text).includes(words)) {
-      if (delivery.state === 'done') return { ...e, state: 'done', words: delivery.said || 'done' };
+      // A command's receipt is no turn of the desk's, so `at` is where the
+      // desk's conversation stood when it came: the room's place for it
+      // (meetingItems), or it would stand last for ever.
+      if (delivery.state === 'done') return { ...e, state: 'done', words: delivery.said || 'done', at: Math.max(e.base ?? 0, sorted.at(-1)?.id ?? 0) };
       return { ...e, state: 'queued', note: delivery };
     }
     return e;
@@ -6047,8 +6059,12 @@
    * A message the room sent is one item, however many desks recorded it:
    * each recipient's user turn for it is folded into it (an entry's `turn`)
    * and never drawn again, so three desks do not show the operator's words
-   * three times. Its place is its first recorded turn; until one is
-   * recorded it stands at the end, the way the panel's pending bubbles do.
+   * three times. Its place is its first recorded turn. One that settled
+   * with no user turn on any desk (a command's receipt, `/compact`, `/btw`;
+   * a failure; a refusal) stands where it settled (each entry's `at`, else
+   * the turn it was sent after): it used to stand at the end for good, under
+   * everything said after it (costmo, 2026-11-27). Until it is recorded or
+   * settled it stands at the end, the way the panel's pending bubbles do.
    * A user turn the room did not send — typed into a window, a nudge struck
    * on the floor, a send whose record a reload lost — is folded with the
    * same words on other desks within `groupMs`, and drawn once.
@@ -6062,7 +6078,11 @@
     for (const s of sends ?? []) {
       const hits = s.entries.filter((e) => e.turn).map((e) => e.turn);
       for (const e of s.entries) if (e.turn) used.add(`${e.agent}|${e.turn}`);
-      items.push({ key: `send:${s.seq}`, kind: 'send', send: s, order: hits.length ? Math.min(...hits) : Infinity, tie: s.seq });
+      const settled = s.entries.length && s.entries.every((e) => ['done', 'failed', 'refused'].includes(e.state));
+      const order = hits.length ? Math.min(...hits)
+        : settled ? Math.min(...s.entries.map((e) => e.at ?? e.base ?? 0)) + 0.25
+          : Infinity;
+      items.push({ key: `send:${s.seq}`, kind: 'send', send: s, order, tie: s.seq });
     }
     const loose = [];
     for (const p of parts ?? []) {

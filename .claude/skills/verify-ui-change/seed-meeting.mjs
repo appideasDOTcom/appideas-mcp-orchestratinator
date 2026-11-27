@@ -164,6 +164,16 @@ async function handle(item) {
       await events([{ type: 'receipt', channel, agent, command: text.slice(1).split(/\s/)[0], text, said: `${text} — done in ${agent}'s window` }]);
       return;
     }
+    // A room's notice (roomNoticeText) is one <meeting-room> block, which the
+    // real relay files as a `context` turn labelled meeting-room
+    // (contextTagOf), never as the operator's words. Echoed as a user turn
+    // with a reply, it put five reds in this check from the day notices
+    // went in (seen 2026-11-27, the same five at HEAD as a control).
+    if (/^<meeting-room>[\s\S]*<\/meeting-room>$/.test(text.trim())) {
+      await sleep(150);
+      await events([{ ...turn(channel, agent, 'context', text), tool_name: 'meeting-room' }]);
+      return;
+    }
     if (agent === 'cy') {
       await sleep(200);
       await events([{ type: 'delivery', channel, agent, state: 'queued', text }]);

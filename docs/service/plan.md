@@ -216,3 +216,19 @@ agent used `send_file`, and the receiving agent opened the delivered path.
 - **Built, not yet walked by a person's path:** desktop-dev's rebuilt Settings ▸ Service pane (email + **Email link**, a code box, a name only for an invitation, a name prompt for a new account). costmo stopped at try-m3.md step 7 on the old pane.
 - **Next, before costmo sees anything:** walk try-m3.md exactly as written, in the real app, with real-inbox addresses, a screenshot of every screen judged as he would (4718). desktop-dev's session needs costmo to allow real-inbox.mjs. Then a fresh reader, then costmo's Mac Mini walk.
 - **Also done tonight:** a guest's desk starts reading at the newest message when its name becomes that guest's (desk_operators.start_cursor; test:service, mutants-guest-cursor.suite.json). "Get the app" on staging's /orchestratinator/.
+
+## M3's finish: one step a side (costmo, 2026-11-27)
+
+- **32. Sharing is one toggle, and an invitation is one button.**
+  - The owner's Settings has "Share my buildings". When it's off, nothing else shows. When it's on, the pane shows:
+    - which buildings are shared (a checkbox each);
+    - the invitations (address, Invited or Joined, Remove);
+    - **Invite user**, which emails the invitee.
+  - Everything else is silent. The one exception is the first sign-in of a computer, which is the browser's "Continue as <you>" (decision 26), opened by the toggle.
+  - Off pauses every guest's access (the lapsed-plan path), and on restores it.
+- **33. The invitee's one step is pasting the code from the email into Settings.**
+  - There is no name field and no website. The account is made at redeem, named from the address until changed.
+  - An app already signed in as that address also lists the invitation in-app with Accept.
+- **34. Self-contained.** A board on one computer and agents on another, on any network, through the service's relay alone. Nobody sets up a tunnel, a port or a Key. The dev service's ngrok address stands in for the deployed `api.orchestratinator.com`.
+- The visible pane loses "Other ways to connect", the Key paste, and general email sign-in.
+- Communication goes through coordinator (costmo, the same day).

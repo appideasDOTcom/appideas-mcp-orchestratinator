@@ -4436,7 +4436,14 @@ try {
     eq(pg.meetingEntry(e0, 'hi', [{ id: 11, role: 'error', text: 'no window' }, { id: 12, role: 'user', text: 'hi' }], null).state, 'failed', 'an error turn first is a failure (settle()\'s rule)');
     eq(pg.meetingEntry(e0, 'hi', [], { state: 'queued', text: 'hi' }).state, 'queued', 'queued: the window\'s own note');
     eq(pg.meetingEntry({ ...e0, state: 'queued' }, 'hi', [], null).state, 'queued', 'and that sticks until the turn comes');
-    eq(pg.meetingEntry(e0, '/compact', [], { state: 'done', text: '/compact', said: 'Compacted' }), { ...e0, state: 'done', words: 'Compacted' }, 'a command: its receipt, in the window\'s words');
+    eq(pg.meetingEntry(e0, '/compact', [], { state: 'done', text: '/compact', said: 'Compacted' }), { ...e0, state: 'done', words: 'Compacted', at: 10 }, 'a command: its receipt, in the window\'s words, placed where it was sent when nothing came since');
+    eq(pg.meetingEntry(e0, '/btw x', [{ id: 9, role: 'assistant', text: 'a' }, { id: 14, role: 'context', text: 'b' }], { state: 'done', text: '/btw x', said: 'asked' }).at, 14,
+      'and placed after what the desk had said by the time its receipt came');
+    eq(pg.meetingEntry(e0, 'hi', [{ id: 13, role: 'error', text: 'no window' }], null).at, 13, 'a failure stands at its error turn');
+    const compacting = pg.meetingEntry(e0, '/compact', [], { state: 'done', text: '/compact', said: 'compacting' });
+    eq(pg.meetingEntry(compacting, '/compact', [{ id: 50, role: 'context', text: 'summary' }], { state: 'done', text: '/compact', said: 'Compacted' }), { ...compacting, words: 'Compacted' },
+      'a receipt in two parts: "compacting" becomes "Compacted" when the desk says so, and keeps its place');
+    eq(pg.meetingEntry(compacting, '/compact', [], { state: 'queued', text: 'something else' }), compacting, 'another message\'s note changes nothing');
     eq(pg.meetingEntry({ ...e0, state: 'refused', words: 'x' }, 'hi', [{ id: 11, role: 'user', text: 'hi' }], null).state, 'refused', 'a refusal is settled');
 
     const line = [{ agent: 'a', host: 'h', state: 'line' }, { agent: 'b', host: 'h', state: 'line' }];
@@ -4456,6 +4463,15 @@ try {
     eq(items.find((it) => it.key === 'u:30').agents, ['bo', 'cy'], 'the same words on two desks within two minutes, not sent by this window, are one message to both');
     eq(pg.meetingItems([{ agent: 'bo', turns: [{ id: 1, role: 'user', text: 'x', created_at: '2026-11-05T10:00:00Z' }] }, { agent: 'cy', turns: [{ id: 2, role: 'user', text: 'x', created_at: '2026-11-05T10:05:00Z' }] }], [], [])
       .map((it) => it.key), ['u:1', 'u:2'], 'and five minutes apart they are two');
+    // costmo, 2026-11-27: a /compact or /btw sent from the room stood under
+    // everything said after it, because a command's receipt is no user turn.
+    const cmdItems = pg.meetingItems(
+      [{ agent: 'bo', turns: [{ id: 40, role: 'assistant', text: 'before' }, { id: 41, role: 'context', text: 'receipt' }, { id: 45, role: 'assistant', text: 'after' }] }],
+      [{ seq: 7, text: '/compact', at: 0, to: ['bo'], entries: [{ agent: 'bo', state: 'done', words: 'Compacted', base: 40, at: 41 }] },
+        { seq: 8, text: '/btw', at: 0, to: ['bo'], entries: [{ agent: 'bo', state: 'refused', words: 'asking', base: 41 }] },
+        { seq: 9, text: 'still going', at: 0, to: ['bo'], entries: [{ agent: 'bo', state: 'line', base: 45 }] }], []);
+    eq(cmdItems.map((it) => it.key), ['t:40', 't:41', 'send:7', 'send:8', 't:45', 'send:9'],
+      'a settled command stands where it settled and scrolls with the transcript; only an unsettled message stays last');
 
     // A participant's box hides or shows that desk's part of the transcript
     // (costmo, 2026-11-14). items: a message to bo and cy, each one's reply,
