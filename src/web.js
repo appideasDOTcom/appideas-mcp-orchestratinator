@@ -421,6 +421,11 @@ function createAdminRouter({ store, auth, closeSessionsFor, meta }) {
     if (!id) return bad(res, 'id is required');
     return buildingAnswer(res, store.renameBuilding(id, req.body?.name));
   });
+  router.post('/building/default', (req, res) => {
+    const id = str(req.body?.id);
+    if (!id) return bad(res, 'id is required');
+    return buildingAnswer(res, store.setDefaultBuilding(id));
+  });
   router.post('/building/delete', (req, res) => {
     const id = str(req.body?.id);
     if (!id) return bad(res, 'id is required');

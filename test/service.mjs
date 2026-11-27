@@ -116,8 +116,21 @@ try {
     eq((await json(await post(A, '/api/admin/building/delete', { id: lab }))).body.code, 'building_not_empty', 'an archived floor still holds its building');
     await post(A, '/api/admin/floor/building', { channel: 'beta', building: mainId });
     eq((await json(await post(A, '/api/admin/building/delete', { id: lab }))).body, { ok: true, id: lab, deleted: true }, 'an empty building is deleted');
+    // The default is a checkmark that moves (costmo, 2026-11-27). Floors in
+    // the old default stay where they are: only floors that arrive later
+    // land in the new one.
+    const garage = (await json(await post(A, '/api/admin/building/create', { name: 'Garage' }))).body.id;
+    eq((await json(await post(A, '/api/admin/building/default', { id: garage }))).body, { ok: true, id: garage, name: 'Garage', moved: true }, 'another building can be made the default');
+    const after = (await json(await fetch(`${A}/api/buildings`))).body.buildings;
+    eq(after.map((b) => [b.name, b.default, b.floors]), [['Garage', true, []], ['Home', false, ['alpha', 'beta']]], 'the new default lists first and empty, and the old one keeps its floors');
+    eq((await json(await post(A, '/api/admin/building/delete', { id: mainId }))).body.code, 'building_not_empty', 'the old default is an ordinary building now: refused only for its floors');
+    eq((await json(await post(A, '/api/admin/building/delete', { id: garage }))).body.code, 'default_building', 'and the new default is the one that cannot be deleted');
+    eq((await json(await post(A, '/api/admin/building/default', { id: 'b_nope' }))).status, 404, 'a building the board does not have cannot be made the default');
+    eq((await json(await post(A, '/api/admin/building/default', { id: garage }))).body.moved, false, 'making the default the default changes nothing');
+    await post(A, '/api/admin/building/default', { id: mainId });
+    eq((await json(await post(A, '/api/admin/building/delete', { id: garage }))).status, 200, 'the default moved back, the empty building goes');
     const acts = (await (await fetch(`${A}/api/activity?limit=200`)).json()).rows.map((r) => r.kind);
-    for (const k of ['admin.building.create', 'admin.building.rename', 'admin.building.delete', 'admin.floor.building']) assert(acts.includes(k), `the audit trail has ${k}`);
+    for (const k of ['admin.building.create', 'admin.building.rename', 'admin.building.delete', 'admin.floor.building', 'admin.building.default']) assert(acts.includes(k), `the audit trail has ${k}`);
     const cross = await json(await post(A, '/api/admin/building/create', { name: 'Evil' }, { origin: 'https://evil.example' }));
     eq(cross.status, 403, 'a building is not made from another site (the CSRF lock covers the new routes)');
   }
@@ -196,6 +209,38 @@ try {
     const two = m.buildingChips(bs, 'b_lab', 'costmo4.local');
     assert((two.match(/<a /g) ?? []).length === 2 && two.endsWith('<span class="muted bld-at">at costmo4.local</span>'), 'with two, the chips and then "at costmo4.local"');
     assert(!m.buildingChips(bs, 'b_lab').includes(' at '), 'at the keyboard, no machine is named');
+  }
+
+  console.log('\nthe page: the boards this operator was invited into (costmo, 2026-11-27)');
+  {
+    const src = readFileSync('src/ui/app.js', 'utf8');
+    const a = src.indexOf('/* ---------- guest boards: what the page decides ---------- */');
+    const b = src.indexOf('/* ---------- end guest boards ---------- */');
+    assert(a > 0 && b > a, 'the section is where its markers say');
+    const tmp = `./data/guest-boards-${process.pid}.mjs`;
+    const escFn = `const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));\n`;
+    writeFileSync(tmp, `${escFn}${src.slice(a, b)}\nexport { guestBoardsList, guestBoardTitle, guestBoardUrl, guestBoardsHtml };\n`);
+    let m;
+    try { m = await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
+    eq(m.guestBoardsList(null), [], 'nothing said is no boards');
+    const list = m.guestBoardsList([
+      { id: 'brd_a', name: 'Pat\'s Mac', label: '  Design  ', state: 'available' },
+      { id: 'brd_b', name: 'Studio', state: 'blocked', why: 'The owner turned sharing off.' },
+      { id: 'brd_c', state: 'weird' },
+      { id: 'brd_a', name: 'again' },
+      { name: 'no id' },
+    ]);
+    eq(list.map((x) => [x.id, x.label, x.state]), [['brd_a', 'Design', 'available'], ['brd_b', 'Studio', 'blocked'], ['brd_c', 'brd_c', 'unknown']],
+      'a label wins over the name, the name over the id; a state the page does not know is unknown; a repeated or missing id is dropped');
+    const t = m.guestBoardTitle(list[0]);
+    assert(t.startsWith('Design — Available') && t.includes("(Pat's Mac)") && t.includes('Right-click to rename'), 'the hover says the state in words and the board\'s own name under a label');
+    assert(m.guestBoardTitle(list[1]).includes('The owner turned sharing off.'), 'and the app\'s reason when it gives one');
+    eq(m.guestBoardUrl('/', 'brd_a'), '/?guest_board=brd_a', 'open is the board id on this page\'s address');
+    eq(m.guestBoardUrl('/', 'brd_a', ' Ops & Co '), '/?guest_board=brd_a&label=Ops+%26+Co', 'a label is trimmed and encoded');
+    eq(m.guestBoardUrl('/', 'brd_a', ''), '/?guest_board=brd_a&label=', 'an empty label asks for the board\'s own name back');
+    const html = m.guestBoardsHtml(list);
+    for (const [state, glyph] of [['available', '✓'], ['blocked', '!'], ['unknown', '–']]) assert(html.includes(`class="gb ${state}"`) && html.includes(`>${glyph}</span>`), `${state} is an outline class and a glyph (${glyph}), never a colour alone`);
+    assert(m.guestBoardsHtml(m.guestBoardsList([{ id: 'x', name: '<img>' }])).includes('&lt;img&gt;'), 'a board\'s name is escaped');
   }
 
   console.log('\nthe page: what it says when its board does not answer');

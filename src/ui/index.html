@@ -47,6 +47,12 @@
        nothing is sent until it is back (floor.js, boardDownWords). -->
   <div id="board-down" class="board-down-bar hidden" role="status"></div>
 
+  <!-- The boards this operator was invited into, a button each, under the
+       header (costmo, 2026-11-27). The desktop app knows them and says them
+       through window.orchBoards; a browser never has any, so it never shows
+       (app.js, "guest boards"). -->
+  <div id="guest-boards" class="guest-boards" role="toolbar" aria-label="Boards you were invited to" hidden></div>
+
   <main>
     <!--
       The floor. Sits alongside the board rather than replacing it: the board is

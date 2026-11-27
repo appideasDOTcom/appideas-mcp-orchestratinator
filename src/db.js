@@ -1824,6 +1824,27 @@ export function makeStore(db) {
     logAdmin(SERVER_CHANNEL, 'building.delete', { actor: by, target: id, detail: `deleted building "${b.name}"` });
     return { id, deleted: true };
   });
+  /**
+   * Which building new floors arrive in (costmo, 2026-11-27: the default is
+   * a checkmark that can be moved). A floor with no building of its own is
+   * in the default, so moving the default alone would carry every such
+   * floor with it, a move nobody asked for. So each floor that is in the
+   * old default now is written into it by name first, and only floors that
+   * arrive after the change land in the new one.
+   */
+  const setDefaultBuilding = db.transaction((id, by = 'operator') => {
+    const b = db.prepare('SELECT name, is_default FROM buildings WHERE id = ?').get(id);
+    if (!b) return { error: 'No such building.', code: 'no_building' };
+    if (b.is_default) return { id, name: b.name, moved: false };
+    const old = ensureDefaultBuilding(db);
+    const pin = db.prepare(`INSERT INTO channel_flags (channel, building_id) VALUES (?, ?)
+                ON CONFLICT(channel) DO UPDATE SET building_id = excluded.building_id`);
+    for (const [channel, bid] of floorBuildings()) if (bid === old) pin.run(channel, old);
+    db.prepare('UPDATE buildings SET is_default = 0 WHERE is_default = 1').run();
+    db.prepare('UPDATE buildings SET is_default = 1 WHERE id = ?').run(id);
+    logAdmin(SERVER_CHANNEL, 'building.default', { actor: by, target: id, detail: `made "${b.name}" the default building` });
+    return { id, name: b.name, moved: true };
+  });
   const setFloorBuilding = db.transaction((channel, id, by = 'operator') => {
     const b = db.prepare('SELECT name, is_default FROM buildings WHERE id = ?').get(id);
     if (!b) return { error: 'No such building.', code: 'no_building' };
@@ -2450,6 +2471,7 @@ export function makeStore(db) {
     floorBuildings,
     createBuilding,
     renameBuilding,
+    setDefaultBuilding,
     deleteBuilding,
     setFloorBuilding,
 

@@ -325,3 +325,39 @@ own walk was the same flow end to end with real email
   the relay. It goes back to the free-app-only wording for the release, or
   to the designer's.
 - Recorded in neve-child's CLAUDE.md, "The service store bands".
+
+## The UI/UX round (costmo, 2026-11-27)
+
+His brief, in the full-team room: Settings in tabs, General | Sharing |
+About; a row of the boards an operator was invited into; Buildings made
+simpler; more room between elements. Then hide the paid features, then
+full QA. Communication goes through coordinator.
+
+- **35. A pasted license key is assigned to the account that pastes it**
+  (by AskUserQuestion, over "the key is the buyer's account" and "no paste
+  this round"). One account holds a key at a time. Pasting it on another
+  account moves it, after an "Assign here". The About tab's Connect button
+  is the existing sign-in. A license counts per account, so every computer
+  signed in to it is licensed. Unlicensed: accept invitations, any number
+  of buildings, no sharing. Contracts: `membership.service_signin` v3
+  (assign, release, `source`, `assigned[]`, `assigned_away[]`) and
+  `service.tunnel` v18–v19 (`license` on /v1/me, POST and DELETE
+  /v1/me/license, `held[].status`).
+- **36. No website messaging this round** ("That will come later"). He
+  first approved one correction to the staging Plans lead, then set the
+  site's words aside for the designer's later round. site-designer's
+  finding stands for that round: "Remote use and invitations need a
+  subscription" tells an invitee they have to pay to accept.
+- Ruled by coordinator, in costmo's words or the decisions above:
+  - **The guest-board row is the board page's**, under its status header
+    ("above the floor, beneath the status header"). The app supplies the
+    list and carries out the acts (`orchestratinator.guest_boards` on the
+    orchestratinator-desktop channel). Each state is an outline and a
+    glyph, never a colour alone.
+  - **Remote control of your own board stays subscriber-only**
+    (decision 8).
+  - **The Settings pane's tabs** take the board page's two views,
+    `?settings=1&section=general|buildings` (`dashboard.settings`).
+  - **The default building is a checkmark that moves**
+    (`POST /api/admin/building/default`). Floors in the old default stay
+    there, and only floors that arrive later land in the new one.
