@@ -1,0 +1,21 @@
+// coordinator's walk, part 1: the owner turns sharing on and invites a real address.
+import { pane, shot, urls, browserSignIn } from './lib.mjs';
+const [port, name, invitee] = process.argv.slice(2);
+const o = await pane(Number(port));
+await o.getByTestId('settings-sharing-on').waitFor({ timeout: 90000 });
+await shot(o, 'c01-owner-fresh');
+const before = urls(name).length;
+await o.getByTestId('settings-sharing-on').click();
+for (let i = 0; i < 40 && urls(name).length === before; i++) await o.waitForTimeout(250);
+await shot(o, 'c02-owner-waiting-for-browser');
+await browserSignIn(urls(name).at(-1), String(process.env.WALK_OWNER_LOGIN), String(process.env.WALK_OWNER_PASS), 'c03-owner');
+await o.getByTestId('settings-sharing-on-part').waitFor({ timeout: 30000 });
+await o.waitForTimeout(4000);
+await shot(o, 'c04-owner-sharing-on');
+await o.getByTestId('settings-sharing-invite-open').click();
+await o.getByTestId('settings-sharing-email').fill(invitee);
+await shot(o, 'c05-owner-invite-user');
+await o.getByTestId('settings-sharing-send').click();
+await o.waitForTimeout(5000);
+await shot(o, 'c06-owner-invited');
+process.exit(0);

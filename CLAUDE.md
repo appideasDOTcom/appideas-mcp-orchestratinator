@@ -516,6 +516,12 @@ This repo's half of M1:
   - The board then sends it to the receiver as an attachment, "From
     <sender>:", listed as "Attached by <sender>:".
   - A host says it can do this with `files: true` at registration.
+- **M3's finish** (2026-11-27, decisions 32–34): sharing is one toggle plus
+  Invite user for the owner, and one pasted code plus Join for the invitee,
+  over the service's relay alone. costmo walked it on two computers.
+  **walk-the-service** is the walk, hidden and with real email. What
+  carries into the next rounds (the soft launch with paid features hidden,
+  QA, then subscription testing) is the last section of `docs/service/plan.md`.
 - Tested by `npm run test:service` (both halves), the page checks
   **check-buildings.mjs**, **check-relayed.mjs** (the page served through
   `relay-hop.mjs`, a stand-in for the app's hop, from

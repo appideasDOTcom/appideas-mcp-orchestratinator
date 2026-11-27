@@ -1173,3 +1173,13 @@ tmux -L probe kill-server
 The scratch dir goes with the scratchpad. Its entry under `~/.claude/projects/`
 does not — small, and harmless to leave, but it is there if a later probe of the
 same path picks up an old conversation with `--continue`.
+
+## Two scripts here for the service (M3)
+
+- **`real-inbox.mjs`**: a real email address on the internet, read over
+  mail.tm's API (`new [label]`, `wait <address>`, `list`). The service's
+  emails are tested by sending them for real and reading this inbox, never
+  a file the service wrote instead. How it's used is in
+  **walk-the-service**.
+- **`files-e2e.mjs`**: `send_file` between two real Claude Code desks (10 of
+  10, 2026-11-25).

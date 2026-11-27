@@ -232,3 +232,96 @@ agent used `send_file`, and the receiving agent opened the delivered path.
 - **34. Self-contained.** A board on one computer and agents on another, on any network, through the service's relay alone. Nobody sets up a tunnel, a port or a Key. The dev service's ngrok address stands in for the deployed `api.orchestratinator.com`.
 - The visible pane loses "Other ways to connect", the Key paste, and general email sign-in.
 - Communication goes through coordinator (costmo, the same day).
+
+## M3 closed (costmo, 2026-11-27), and what carries into the next rounds
+
+costmo walked the finished flow on two computers: Share my buildings, Invite
+user, the code pasted with Join, then agents talking. His words: "functionally
+and from an operator workflow perspective, I am very pleased." coordinator's
+own walk was the same flow end to end with real email
+(`.claude/skills/walk-the-service`).
+
+**The plan from here** (costmo, the same day):
+1. **A UI/UX round.**
+2. **Hide the paid features for a soft launch.** In the app, that means
+   Settings ▸ Orchestratinator service, Share my buildings, the
+   invitations, Join, and anything else that names the service or a
+   subscription. On appideas.com, it means the plans, store and sign-in
+   pages. Hide them in the build, not with a setting an operator can switch
+   (costmo's rule: one system, no operator choices).
+3. **A full QA round on staging**, then a release without paid features.
+4. **Then back to subscription testing** and sharing in our own
+   environment, then the service's own launch.
+
+**Carried, so it isn't lost:**
+- **At the QA round (step 3):** desktop-dev's unrun mutation proofs.
+  - 11 cover the v17.1 account-wide list and the hidden-launch guard
+    (`stayBehind`). 9 of 18 were caught before the walk paused them, and
+    none survived.
+  - The busy treatment's mutations (`busily`, the 30 s
+    `SERVICE_TIMEOUT_MS`) haven't run yet.
+- **When the dev service is next restarted:** service-dev's Join-retry fix
+  (migration 010) goes live.
+  - What it does: a redeemed code is kept for 10 minutes with its computer
+    name, so a Join retried after a client-side timeout gets 200, not
+    join_invalid.
+  - It's built and gated, and not yet live. It proves nothing new and needs
+    no walk of its own.
+- **At subscription testing (step 4):** the walk items not re-walked since
+  v17:
+  - files between the two computers;
+  - a meeting room across them;
+  - Replace Key;
+  - Town's people limit;
+  - cancelling and renewing the plan (lapse, then restore).
+  Each was walked before v17, and walk-the-service's scripts are the
+  starting point.
+- **At the service's launch:**
+  - deployment at DigitalOcean (orchestratinator-service/docs/DEPLOY.md,
+    applied by costmo, decision 19), with the hostnames of decision 20;
+  - a SendGrid production sender;
+  - real Stripe prices (decision 22's placeholders go);
+  - membership's plugin and theme 2.13.0 on production (the email's
+    Get-the-app link needs that theme's section);
+  - an app release pointing at api.orchestratinator.com, through the usual
+    QA, signing and publishing round.
+- **Later:** the designer's round on the store and app pages. The brief's B
+  and C come after that: your own board from another device, and from
+  app.orchestratinator.com. The relay under both has been built since M1,
+  but neither app exists yet.
+
+**Added by service-dev (msg 4832):**
+- **At the QA round:** the service's full `make prove`, about 383 mutations
+  run headless, against the code as it stands after the UX and clean-up
+  round. So far only the changed code's mutations have run, and all of them
+  passed.
+- **The soft launch's own check (desktop-dev and coordinator):** the build
+  with the paid features hidden makes no call to the service. There's no
+  sign-in prompt, no tunnel dialled at startup, and nothing that names
+  orchestratinator-dev.ngrok.dev.
+- **At the service's launch:**
+  - DEPLOY.md covers the console secrets, orchestratinator.com's DNS and the
+    Cloudflare traps.
+  - Measure App Platform's limits on the tunnel, on streams and on request
+    length on the first deploy.
+- **Known limits, not scheduled:**
+  - The service runs as one instance, because tunnels live in one process's
+    memory.
+  - A board left behind by a reinstall is listed as offline, and nothing
+    deletes it yet.
+  - The router's 404 and 405 answers are plain text.
+- The dev service stays up on costmo's Mac for our own testing.
+  service-dev's `make dev-down` stops it.
+
+**appideas.com at the soft launch (theme-developer, msg 4833):**
+- The theme ships with the soft launch. Its Get the app section is free
+  downloads only, so the email's Get-the-app link isn't held to the
+  service's launch.
+- The Plans band (`#plans`) leaves the build: theme-dev drops
+  `service-plans` from the section order for the release. Production would
+  hide it anyway while it has no plan products, but the build doesn't rely
+  on that.
+- The open-source paragraph (`oss.body`) is the one theme string that names
+  the relay. It goes back to the free-app-only wording for the release, or
+  to the designer's.
+- Recorded in neve-child's CLAUDE.md, "The service store bands".
