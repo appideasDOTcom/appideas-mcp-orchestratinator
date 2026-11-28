@@ -393,3 +393,11 @@ full QA. Communication goes through coordinator.
   - **On the PC, connecting with a key read "The service didn't answer" at
     once.** The same works from the Mac Mini. He chose not to chase it now,
     so it's carried to the QA round, Windows desktop-app role.
+- **Test builds carry the dev service** (costmo, 2026-11-28, by
+  AskUserQuestion: "Bake it into test builds", over a launch flag). A
+  packaged app defaulted to api.orchestratinator.com, which is NXDOMAIN
+  until the service launches, so every built app read "The service didn't
+  answer" at once. For his two-computer sessions, the Mac app and the
+  Windows Setup.exe are built from develop with the dev service's address
+  baked in at build time. About says so. A release build is unchanged, and
+  publishing refuses a build with a baked address. desktop-dev's.
