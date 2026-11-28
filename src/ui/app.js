@@ -1923,7 +1923,23 @@ function renderBuildingsSection() {
   if (sec.outerHTML.trim() === html) return;
   const box = document.createElement('div');
   box.innerHTML = html;
-  if (box.firstElementChild) sec.replaceWith(box.firstElementChild);
+  const next = box.firstElementChild;
+  if (!next) return;
+  // What is being typed, and a refusal said about it, outlive the redraw.
+  // The guard above holds only while focus is in a field, and a click on ✓
+  // moves it to the button: a poll asked before the last change, landing
+  // then, drew the section from that older state and emptied the field (a
+  // release-gate red at 7194e2f; check-buildings, "a poll from before").
+  for (const old of sec.querySelectorAll('#building-new, [data-building-name]')) {
+    const sel = old.id === 'building-new' ? '#building-new' : `[data-building-name="${CSS.escape(old.dataset.buildingName)}"]`;
+    const now = next.querySelector(sel);
+    if (now) now.value = old.value;
+  }
+  const err = sec.querySelector('.set-bld-err'), errNow = next.querySelector('.set-bld-err');
+  if (err && errNow && !err.hidden && set.bldEdit) { errNow.hidden = false; errNow.textContent = err.textContent; }
+  const act = sec.contains(document.activeElement) ? document.activeElement : null;
+  sec.replaceWith(next);
+  if (act?.dataset?.set) next.querySelector(`[data-set="${CSS.escape(act.dataset.set)}"]${act.dataset.id ? `[data-id="${CSS.escape(act.dataset.id)}"]` : ''}`)?.focus();
 }
 
 async function buildingAct(path, body, { keepEdit = false } = {}) {

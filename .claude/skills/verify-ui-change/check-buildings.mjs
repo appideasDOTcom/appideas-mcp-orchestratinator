@@ -74,6 +74,13 @@ await p.press('[data-set="building-save"][data-id="new"]');
 await until(p, `!document.querySelector('#set-buildings .set-bld-err').hidden`, 'a taken name is refused in the section');
 ok(/already a building called "Lab"/.test(await p.evalJs(`document.querySelector('#set-buildings .set-bld-err').textContent`)), 'in the board\'s words', await p.evalJs(`document.querySelector('#set-buildings .set-bld-err').textContent`));
 ok(await p.evalJs(`document.querySelector('#building-new')?.value === 'lab'`), 'and the field stays, holding what was typed, to be fixed');
+// A poll asked before the last change lands while the row is open and
+// focus is on ✓, not in the field: the section is drawn from that older
+// state. What was typed, and the refusal, must survive it (a gate red at
+// 7194e2f, 1 of 4 runs; made certain here by drawing the older state).
+await p.evalJs(`document.activeElement?.blur?.(); document.querySelector('[data-set="building-save"][data-id="new"]').focus(); ui.state = { ...ui.state, buildings: ui.state.buildings.slice(0, 1) }; renderBuildingsSection(); true`);
+ok(await p.evalJs(`document.querySelector('#building-new')?.value === 'lab' && !document.querySelector('#set-buildings .set-bld-err').hidden`), 'and a poll from before drawn under it keeps both the typed name and the refusal', await p.evalJs(`JSON.stringify([document.querySelector('#building-new')?.value, document.querySelector('#set-buildings .set-bld-err')?.hidden])`));
+await p.evalJs(`getJson('./api/state').then((st) => { ui.state = st; renderBuildingsSection(); return true; })`);
 await p.evalJs(`document.querySelector('#building-new').focus()`);
 await p.key('Escape');
 await until(p, `!document.querySelector('#building-new')`, 'Escape leaves the add row');
