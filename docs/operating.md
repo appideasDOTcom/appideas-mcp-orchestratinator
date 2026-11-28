@@ -1,525 +1,195 @@
-# Operating the board
+# Using the floor
 
-One page draws two views of the same server: the **board** (a row per agent)
-and the **floor** (a room per project, a desk per agent at work). The switch is top
-right. This page is the operator's manual for both, and for the small set of
-actions only a human can take.
+Everything you do in the Orchestratinator happens on the floor. This page goes
+through it a part at a time. New here? Start with [Day to day](day-to-day.md).
+Back to the [README](../README.md).
 
-## The dashboard
+## The building
 
-Open **`http://localhost:8787/`** in a browser — or the machine's address on
-your network, if you've published the port beyond loopback. It's a view of the
-same SQLite database the tools write to, refreshing itself every couple of
-seconds; no reload needed. Reading it changes nothing.
+Every project is a floor, and the building shows them all at once. The header
+counts who's at work and who needs you. An agent needs you when it asks
+permission, asks a question, hits an error, or finds Claude Code signed out.
 
-There is no sign-in. The board is open to anything that can reach the port, and
-the only credential in the system guards `/mcp` — see
-[the security model](security.md). That is a deliberate trade for one machine
-on one trusted network: the boundary is the network, not a password.
+Each desk tells you about its agent at a glance:
 
-You get three things:
+<img src="images/floor-desk.png" width="222" alt="One desk: thought bubble, red badge, the monitor tinted while it waits, service bell, and tray">
 
-**Channels & agents.** One card per channel, one row per agent, with a presence
-dot: green = a live MCP session, amber = no live session but it called
-something in the last 5 minutes, red = gone.
+- **The thought bubble** is the last thing it said.
+- **The desk sign** is what it says it's doing.
+- **The red badge** means it needs you.
+- **The tray** holds its unread messages and tasks.
+- **The service bell** tells it "you've got work".
 
-A caveat worth knowing, because it's an MCP fact rather than a bug here: a
-session ends when the client says so, and clients vary. Some reuse one session
-for the life of the window; others (Claude Code driving a `/loop`, for
-instance) open a fresh session per turn and never tear the old one down. The
-server therefore prunes for them — a new session for a given channel+agent
-supersedes that pair's older idle sessions, and anything untouched for
-`SESSION_TTL_MINUTES` (default 15) is closed. Clients recover silently, since
-an unknown session id answers `404`, which is the spec's cue to re-initialize.
-The practical consequence: green means "we heard from this window recently",
-and a window you closed goes red within the TTL rather than instantly.
+A quiet desk is drawn quiet: the floor never guesses that a silent agent is
+stuck. A desk with nothing running behind it isn't drawn, and it comes back by
+itself when it starts again.
 
-<img src="images/board-offline.png" width="470" alt="An offline channel card: red presence dots, OFFLINE, seen 2d ago, idle chips">
+**Several floors at once.** Open any floor in a window or tab of its own with
+**⧉** on its name, or **File ▸ New Floor Window**. A tab turns amber when
+something on that floor needs you.
 
-*A gone team reads as gone: red dots, `seen 2d ago`, and chips fallen back to
-derived `idle`.*
+<img src="images/app-tabs.png" width="502" alt="The app's tab strip with two floors, one amber with something waiting">
 
-**Approximate last-known state.** Each agent gets a state chip. If the agent
-has called `set_status` and that status hasn't expired, its declared state wins
-and is shown with its age — `waiting · 3m ago` — with the detail line beneath
-(`e2e public tier, ~8m`). The four states are `working`, `waiting`, `blocked`
-and `idle`; the chip's colour comes from the state the agent declared, never
-from guessing at its words. Otherwise the state is **derived** from the board:
-a claimed task shows as `working — #12 update consumers…`, pending mail as
-`waiting — 2 unread messages`, assigned-but-unclaimed work as
-`waiting — 1 task assigned`, and nothing pending as `idle`. It's an
-approximation by design — the server can't see inside the agent's turn, only
-what it last told the board (coordination is pull, not push; see
-[how agents coordinate](coordination.md)).
+## Taking a desk
 
-<img src="images/board-card.png" width="470" alt="A live channel card: green presence dots, declared status chips with ages, detail lines, unread and assigned counts">
+**Take a desk** puts an agent on a floor. Choose the project folder, name the
+floor and the agent, and its Claude Code starts there.
 
-*A live team: green dots, declared chips with their ages, the detail line
-beneath, and the derived counts (`1 unread · 1 assigned`).*
+<img src="images/take-a-desk.png" width="480" alt="The Take a desk dialog with a folder chosen and the floor and agent named">
 
-**A status expires.** Every `set_status` carries a TTL (`ttl_seconds`, default
-900, override with `STATUS_TTL_SECONDS`). Past it the status is treated as
-absent and the chip falls back to a derived state. This is the load-bearing
-part: without it an agent that crashes mid-run leaves `waiting` on the board
-forever and the human keeps trusting it. The displayed age exists for the same
-reason — `waiting · 40m ago` reads as suspect in a way a bare `waiting` cannot.
+If the folder already has a desk somewhere, the dialog offers **Move to** this
+floor,
+or **New desk here** to put the same agent on this floor *as well*, with a
+conversation of its own. A folder that belongs to another Orchestratinator is
+brought over in the same click, and the dialog says so first.
 
-Note what is deliberately **not** inferred: a long gap since an agent's last
-tool call is never read as "waiting". That gap looks identical whether the
-agent is blocked, crashed, or simply finished and quiet, so only the agent can
-say — which is what `set_status` is for.
+**Leave desk** takes an agent off the floor. The folder and its
+conversations stay where they are, and **Take a desk** brings it back.
 
-**Archive a channel to put it away.** The 🗑 on a channel header opens the
-channel dialog, and **Archive** there puts the channel away for everyone: off
-the board's cards, the activity filter and the desk dialog's Floor dropdown,
-and off the floor and its picker. It stays as a pill beneath the cards — and
-beneath the building on the floor — carrying its unread count, and clicking
-the pill restores it. It is a shared, audited statement (see *Operator
-actions* below), not a view preference. There is deliberately no
-browser-local way to fold a channel out of sight: there used to be one, it
-looked exactly like archiving in every list, and the two were undone in
-different places — so a floor "still archived" after a restore was usually a
-floor folded in that one browser. One mechanism, one place it shows.
+## Talking to an agent
 
-**Activity log.** Every interesting write — messages, task
-opened/claimed/done, contract versions, and operator actions — merged into one
-newest-first list, filterable by channel, by kind, and by free text. Click any
-row to expand the full stored value (message body, task note, contract JSON).
+Click a desk and its conversation opens beside the floor, live. Type and press
+Enter. You never have to wait: a message sent while the agent works joins what
+it's doing, and one sent while it's asking you something waits until you
+answer.
 
-![The activity log: messages, task transitions, and contract versions in one newest-first list](images/board-activity.png)
+<img src="images/floor-panel.png" width="460" alt="A desk's conversation: the live transcript, a permission request with Approve, Deny and Cancel, and the composer">
 
-## The floor
+**Permission requests** come with **Approve** and **Deny** (with a box for what
+to do instead), **Cancel**, and, when Claude Code offers it, **Yes, and don't
+ask again** for that kind of request. Several requests wait in line and come
+one at a time; one from a subagent says so.
 
-The `board` / `floor` switch gives you the second view: **one room per channel,
-one desk per agent at work**. It exists for the people who operate this system without
-having built it. The board answers *what is the state*; the floor answers *who
-is stuck, and what do I do about it* — the question that was otherwise being
-answered by holding several chat windows and a dashboard in one head at once.
+<img src="images/prompt-box.png" width="458" alt="A permission request asked by a subagent, with Don't ask again and one more waiting">
 
-A floor is a channel. Nothing else would be honest: a channel is one project
-with one set of boundaries, and putting two of them in a room would draw a wall
-that isn't there.
+**Questions** come as a form, built from the agent's own question.
 
-**What you get.** A room per channel: each desk shows the person's state, the
-last thing they said or the tool they're running, and a red badge when they
-need you. The floor's header counts the desks that need you (`1 need you`),
-and so does each room's, so you go where it points. Envelopes
-fly desk to desk on real `send_message` rows, never on a timer. Click any desk
-for that agent's conversation, live, with tool calls collapsed to one line.
+**Files.** Drop, paste or pick files into the box to hand them over, in a
+desk's conversation or a meeting room.
 
-<img src="images/floor-desk.png" width="222" alt="One desk: thought bubble, red badge, the monitor tinted while it waits, service bell, and tray pills">
+<img src="images/attachments.png" width="458" alt="The composer with two attached files">
 
-*One desk says all of it: the thought bubble, the red badge, the monitor
-tinted while it waits on you, the service bell, and the tray (2 unread,
-1 task). A working desk's monitor types the tool it is running instead.*
+**Slash commands, model and effort** work as they do in Claude Code. The
+model and effort you pick become your default for new conversations, and a
+new conversation shows them before its first message. The red octagon stops
+the agent mid-turn; the conversation shows it was interrupted.
 
-**What the floor knows that the board cannot.** The board is pull-based and
-cannot see inside an agent's turn. The floor closes the gap from the other end:
-Claude Code can see inside its own turn and will say so through hooks, so each
-workstation runs a small plugin that posts what its session is doing. That is
-the only new moving part, and it is optional — without it the board behaves
-exactly as it always has.
+**Signed out?** If Claude Code is signed out on a computer, its desks say so
+and offer **Sign in**, which opens Claude's sign-in in your browser.
 
-Nothing on the floor is inferred from silence. A desk shows `needs you` only
-because Claude Code raised a permission or idle prompt, and it clears the
-moment real work happens. A quiet desk is drawn quiet, because quiet is
-indistinguishable from blocked, crashed, and finished — which is the same
-reason the board never guesses either.
+<img src="images/sign-in.png" width="458" alt="A desk showing Claude Code signed out, with a Sign in button">
 
-**An empty desk is not drawn.** A desk with nothing live behind it — its host gone quiet, a window that has
-never checked in, a session that ended — is left off the storey rather than
-drawn as a nameplate nobody can type into. It comes back by itself the moment
-something is live behind it; nothing is clicked and nothing is recorded. The
-storey's header still counts it (`3/5 here` over three desks is the truth
-about that floor), and it is still in the payload, so nothing downstream
-changes. To put a desk away on purpose, whatever its state, use **Hide desk**
-on its nameplate card (below); that one is a pill, and only its pill brings
-it back.
+**Sessions** on a desk starts a new conversation or reopens an earlier one.
+**Saved prompts**, beside the box, keeps the messages you send over and over.
 
-The plugin reports on session start and end, on each prompt you submit and each
-reply that finishes, as a tool starts, and when Claude Code needs you. Every
-hook detaches immediately, so none of it is on the critical path of a turn, and
-every failure — server down, network gone, malformed config — exits quietly. A
-floor going stale is visible on the floor; a red line in somebody's terminal is
-a bug report about a feature they weren't thinking about. The hook reports
-every session, hosted or not. What it sends is *state* — a turn started, a
-prompt is open, the session ended — never the conversation, which the floor
-reads from Claude Code's own transcript and so does not depend on a hook
-firing. Content is sent too, and is used only for a desk on a machine with no
-host running, where a partial conversation beats none. What that puts on the
-server, and what it deliberately doesn't, is spelled out in
-[the security model](security.md).
+**Pop a chat out.** **⧉** on a conversation moves it into a window of its own.
+Keep a few open beside the floor; each stays live. **Re-attach** brings it back,
+with whatever you'd typed.
 
-## Chatting with a desk
+<img src="images/popouts.png" width="820" alt="The floor with one desk's conversation open and two more popped out beside it">
 
-A desk is one conversation, and one app holds it at a time — a conversation is
-a `claude` process, not a document two windows can share. The panel always says
-who holds this one.
+## Meeting rooms
 
-**The floor holds it.** A small service on the workstation — the host, under
-[`host/`](../host/) — is running that desk's `claude` as a process of its own,
-spoken to through Claude Code's programmatic interface: the same binary, login,
-tools, `.mcp.json`, hooks and `CLAUDE.md` as any session you open in that
-directory. Type on the floor and it is a user turn in that
-session; the reply comes back into the panel as the session writes it; a
-permission prompt becomes **Approve / Deny** on the desk, and the header
-counts it under `need you`. The human is still the one deciding — from one screen instead of one per
-agent. Enter sends, Shift+Enter is a new line, **stop** interrupts the turn.
-The box grows with what you type, up to fourteen lines, and then scrolls.
-Drag its corner taller and it keeps that height for this desk's conversation
-(across desk switches and reloads) while still growing past it. Drag it back
-to its smallest and it goes back to growing on its own; a new conversation on
-the desk starts at the default.
-To work in that conversation yourself, **Open in Claude** hands it to a terminal
-of your own, and the floor's next message takes it back.
+Press **select desks** on a floor, check the agents you want, and press
+**Meeting room**. One window holds them all: who's there along the top, one
+conversation with each agent's words in its own colour, and one box to type in.
+A message goes to everyone; start it with `@name`, or use the chips above the
+box, to speak to some of them. Under each message you see it reach each desk.
 
-<img src="images/floor-panel.png" width="460" alt="The desk panel: the live conversation, a permission request with Approve, Deny and Cancel, and the composer">
+<img src="images/meeting-room-700.png" width="700" alt="A meeting room: three agents along the top, one message to everyone with a delivered line per desk and three replies, then a message to the QA Engineer alone">
 
-*The desk panel: the conversation as it happens, the permission prompt with
-its real choices, the composer — and the doors to VS Code and to Claude in a
-terminal.*
+On the floor, the agents in a meeting stand together in an **In a meeting**
+box. Click the label to bring the meeting's window forward; **End meeting**
+ends it. Each agent is told when it joins and leaves, and while the meeting is
+on, what its agents broadcast to each other stays in the room. **Nudge all**
+rings every agent in the room that has work waiting.
 
-**Your editor holds it.** The floor still shows the conversation, but the
-composer is greyed and names the pid holding it. Permission prompts appear with
-no buttons — answering one means a keystroke in the window that asked, and the
-floor has none to press, so it says *"answer this in your editor"* rather than
-offering a button that cannot work. Close the tab and the floor takes over a
-second or two later. **Open in VS Code** moves it back the other way: the host
-shuts its own window first, then opens the conversation in your editor with
-everything you did from the floor already in it.
+**One agent in two meetings.** Check an agent that's already in a meeting and
+it joins the new one too, as a second session with a conversation of its own.
+Its second desk carries a number: **QA Engineer · 2**. The extra session
+closes by itself when its meeting ends.
 
-**Nobody holds it.** No host on the board is running that repo, so the desk
-says so instead of offering a composer with nowhere to deliver.
+<img src="images/two-places.png" width="760" alt="One floor with two In a meeting boxes, the QA Engineer in one and QA Engineer · 2 in the other">
 
-**Several chats at once.** The **⧉** button in the panel's header detaches that
-desk's chat into a narrow window of its own. The window holds the panel's
-header, the desk as the floor draws it, and the whole chat underneath. Put it
-beside the floor, detach a few more, and each one stays live. Everything works
-in a popout exactly as it does on the floor: the bell, the pills, the
-nameplate card, the composer, the question forms, Stop, model and effort,
-Sessions, Leave desk. A dialog opens in the window you clicked it in. While a
-desk is out, opening it on the floor shows its header and **Bring chat back
-here**, because only one place types into a desk. **⧉** on a desk that is
-already out brings its window to the front rather than opening a second. To
-end it, press **Re-attach** in the popout or **Bring chat back here** on the
-floor, and the chat comes back to the floor's panel, with whatever you had
-typed. Just closing the window ends it too; the chat opens on the floor if
-its panel is shut or already on that desk, and otherwise the panel stays
-where you are and the desk opens normally when you click it. A popout keeps working if the floor tab is
-reloaded or closed. It follows its desk to another floor, stays put if the
-desk is hidden, and says so if the desk is left. The browser shows a read-only
-address strip on the popup; fully chromeless windows are the desktop app's
-job, not the page's.
+**Meetings keep.** Quit the app and the meeting is still there: its agents stay
+in their box, and the room opens again when the app does. **Meeting rooms** in
+the floor's header lists recent meetings, and **Resume** reopens one with every
+agent back on its conversation.
 
-<img src="images/popouts.png" width="820" alt="The floor with the App Developer's panel open on a permission request, and two popped-out chats beside it: the API Developer's and the Project Manager's, each with its desk above its conversation and composer">
+## Handing out work
 
-*Three places a chat can be: the floor's own panel, and two desks popped out
-beside it, each live and each with Re-attach in its header.*
+Agents on a floor share a mailbox and a task list. When a desk's tray shows
+something waiting, ring its **service bell** and the agent picks it up. If it
+isn't running, the bell starts it first, where it left off. An agent with work
+waiting and nothing running is woken after a minute anyway, with the work named.
 
-**Several desks in one chat.** On a floor, **select desks**, check two or
-more, and press **Meeting room**. One window opens with those desks in it:
-who is in the room and what each is doing (working, idle, needs you) in a
-row along the top, one transcript of everything said from then on with each
-desk's words labelled and coloured as its shirt, and one composer. A message
-goes to everyone in the room unless you narrow it: with the chips over the
-box, or by starting it with names (`@bo @cy look at this` goes to Bo and Cy,
-and they receive "look at this"). With every chip lit, a click on a name
-leaves only that desk; click another name to add it, click a lit one to
-take it out, and click the last lit one for everyone again. The chips stay
-as you set them from one message to the next, until you change them or
-reload the window; names typed at the start of the box are for that one
-message only. To read fewer desks at once, click a desk's box in the row
-along the top (anywhere but its buttons): its part of the transcript is
-put away and the box reads **hidden**; click it again and everything it
-said is back where it was said. A hidden desk still hears your messages. Each desk's delivery shows under your
-message on its own: sending, queued, delivered, or not sent with the board's
-reason (an editor holding it, a host offline). The desks never hear each other
-through the room, and what they say to each other on the board stays in
-it: while a room is open, a broadcast from one of its desks reaches the
-room's other desks and nobody else on the floor (a message addressed to one
-agent still goes to that agent). Under each desk's name are its badges: unread messages
-waiting for it on the board, its tasks (each opens the same dialog as on the
-floor, with Mark all read and Nudge agent), a bell to nudge that desk, and
-its stop sign. **Nudge all (3)** beside Send nudges the desks the chips choose
-that have something waiting on the board, and only those: the number is
-their unread messages and unclaimed tasks together. With nothing waiting it
-has no number and cannot be pressed; a desk's own bell still nudges that
-desk on purpose. A desk's question forms, permission prompts, Stop and
-slash-command receipts are answered in the room, each in a box labelled with
-its desk. **Add a desk** offers the floor's other desks that are not in a
-window already; **✕** on a desk, or **Bring back from the meeting room** in
-its panel on the floor, puts it back on the floor. **End meeting**, or
-closing the window, ends it. While a meeting is on, its desks stand
-together on the floor in a box of their own, labelled **In a meeting**,
-with an **End meeting** button on the box's corner that does what the
-window's does. A click on **In a meeting** brings that room's window to
-the front, where your pointer is. On one floor the boxes are at the top, one per meeting; in
-the building they are part of the storey's row. Every desk in the meeting stands in its box,
-hidden or not, and **Hide desk** waits until the meeting ends; a desk hidden before it joined
-is its pill again then. Ended rooms are drawn nowhere and counted
-nowhere: **Meeting rooms** in the floor's header lists the last twenty,
-newest first, and **Resume** opens one again with each desk back on the
-conversation it had — or says, desk by desk, why not (it left, it moved
-floors, its window is busy, its conversation is gone). A desk that missed a
-Resume for a reason that may pass, like a busy window, stays in the room
-and is tried again at the next Resume.
+**select desks** also acts on several desks at once: **Nudge**, **Mark read**,
+or **Hide**.
 
-**One agent in two rooms.** A desk that is already in a meeting room can be
-checked for another: the count on **Meeting room** includes it, and its
-hover says so. The new room gets a **new session** of that agent, a second
-desk in the same folder with a conversation of its own, and the session in
-the first room carries on untouched. On the floor the agent then stands in
-both boxes: its own desk in one, and a desk carrying its name with a number
-(**Quinn · 2**, agent id `quinn-2`) in the other. The second session has the
-agent's name and face; a rename of either renames both. Other agents see it
-under its numbered id. A message or task they address to the plain name
-goes to the session that is in a meeting room with the sender, and
-otherwise to the agent's first desk; the numbered id always goes exactly
-there. **Bring back from the meeting room** on any of the agent's desks
-takes the agent out of **every** room it is in, on every floor. A session
-made for a room closes when it is in none (End meeting, ✕, Bring back, or
-the room's window gone for good): its window closes and its desk leaves the
-floor, never in the middle of a turn. A window that only slept is not
-gone: after a silence the instance watches the room for a minute and a
-half before it closes anything, and a room whose window speaks in that
-time keeps its sessions. A second session starts with nothing unread:
-what the floor carried before it was made is in the agent's first desk's
-mail. Its conversation stays in the folder,
-where History reads it, and **Resume** of that room makes the session again
-on it. A session its host cannot start is said in the room, in the host's
-words, and the room carries on with the desks that did arrive.
+<img src="images/select-desks.png" width="775" alt="A room's header in select mode: three desks checked, with Nudge, Mark read, Hide and Meeting room">
 
-<img src="images/meeting-room-700.png" width="700" alt="A meeting room with the Project Manager, API Developer and QA Engineer along the top, one message to everyone with a delivered line per desk and three replies, then a message to the QA Engineer alone and its reply, and the composer with its To chips">
+## History
 
-*One message to the room, delivered desk by desk, and the replies coloured
-by desk; then `@qa-engineer` narrowing the next one to QA alone.*
+**History** searches your conversations across every connected computer.
+Open any one to read it whole, without starting it again.
 
-The host only ever reaches *out*. It registers with the server, then holds a
-request open asking for work; the server never connects to a workstation and
-nothing on the workstation listens. If the server is down the host retries; if
-the host is down the floor says so and the composer goes quiet. Sessions
-survive host restarts — the server remembers each desk's session id and the
-host resumes it.
+<img src="images/history.png" width="560" alt="History: a search with results, and one conversation open to read">
 
-## The small controls
+<img src="images/history-read.png" width="442" alt="A past conversation open to read, marked as not live, with Back to live">
 
-Half of running a floor is in controls too small for a section of their own.
-None of them should have to be discovered by accident:
+## Keeping the floor tidy
 
-- **The nameplate card.** Click any desk's nameplate for who this desk is —
-  the repo, branch and model behind it, and who holds the conversation — plus
-  an **Open conversation** button, **Move to another floor**, **Hide
-  desk** and **Leave room** under it, and the door to editing the avatar.
-  While the desk is in a meeting room all four are greyed, with the reason
-  under them: its conversation and controls are the room's window's until
-  it is brought back or the meeting ends. (A click on the desk itself still
-  opens its panel, which holds Bring back from the meeting room.)
-- **Leave room.** Takes the desk off its floor: its window closes and its
-  binding is removed, after the same confirmation the chat panel's **Leave
-  desk** asks. The folder and its conversations stay where they are, and
-  **Take a desk** brings the agent back. On one of several desks an agent
-  has in one folder (below) it removes only that desk: the others keep
-  running and nothing in the folder changes.
-- **New desk here.** Take a desk, standing on a floor, with a folder that is
-  already a desk somewhere: beside **Move to …** there is **New desk here**.
-  It seats the agent on this floor **as well**, with a new session in the
-  same folder, and leaves the session it has (and any others) running. So
-  one agent can work several floors at once, each conversation its own. On
-  a floor where nobody answers to its name it keeps the name; on its own
-  floor, or one where the name is taken, the new desk takes the name with a
-  number (`quinn-2`), and the dialog says which before you press. Such a
-  desk is the floor's window only: **Open in VS Code** is not offered on
-  it, because an editor opened in that folder is the folder's own desk, and
-  **Move to another floor** is greyed with the reason (use New desk here on
-  the floor you want, and Leave room on this one). **Leave room** removes
-  it.
-- **Move to another floor.** Seats the agent on another floor — one on the
-  board, or a new one by name — without finding its folder first: the desk
-  already knows its folder and its host, so you pick only the floor, and the
-  page goes there with you. It is the same move Take a desk makes when you
-  choose a folder that is bound elsewhere, with the same refusals in the
-  same words (not while a turn is running; not without its host). Take a
-  desk opened while you are on a floor keeps that floor when you choose a
-  folder, so a folder bound elsewhere comes to the floor you are on. If the
-  floor holds the agent's window, that window closes and **a new
-  conversation** opens on the new floor — the one it was on stays in its
-  folder, in the session picker and History. With no window open, it opens
-  on its **last conversation**. An agent's name and look go with it. The
-  button is greyed, with the reason under it, on a desk no live host runs.
-  The dialog stays open until the agent is seated on the new floor, then
-  takes you there; if its host refuses the move — its window turns out to be
-  mid-turn, say — the dialog says so in the host's words, the agent stays
-  where it was, and its desk there says so too. Take a desk's move waits the
-  same way.
-- **Hide desk.** Puts that desk away by hand: it becomes a pill carrying the
-  agent's name in a row under the storey's last desk, and clicking the pill
-  brings it back. It is the server's flag, like archive — shared by every
-  browser, with an audit row — and nothing the agent does clears it: not
-  coming back to life, not a session starting on the floor. The pill
-  clears it, and so does taking the desk onto another floor: the flag
-  belongs to the seat it leaves, the desk arrives on the new floor drawn,
-  and the floor it left gets a restore row saying so. A hidden
-  desk still counts in the storey's `N/M here`, still counts in the header's
-  `need you` when it needs you, and carries its unread count on the
-  pill; hiding is a statement about your attention, not about the agent's
-  work, and it is not retire — the seat, the name and the face are kept.
-- **Select desks.** On every room's header, beside *put away*, in the
-  building as well as on a floor of its own. It turns that room into a
-  selection: a large checkbox over each drawn desk (above the bell), **check
-  all / uncheck all**, and three actions on the checked desks. Each desk gets
-  what its own control gives it, one request and one audit row at a time:
-  - **Nudge** is the bell. Desks with a window are nudged first, then those
-    without one, because the host types one message at a time and a window
-    that has to come up first would hold up everything behind it. The
-    control says before you press it how many of the checked desks will have
-    a window opened first (*"Nudge 4 · 2 open a window"*), and each of those
-    desks reads *no window*. A desk the board can't reach, such as one held
-    by an editor or one with no host, is not sent anything and reads *can't
-    nudge*, with the reason on hover. If one of the nudged desks'
-    conversation is open beside you, its message bubble says where it is in
-    the line rather than counting to "not recorded".
-  - **Mark read** is the backlog dialog's **Mark all read (operator)**, on
-    every checked desk with something unread. The count is on the control
-    before you press it (*"Mark read · 7"*). It marks up to the newest
-    message the page was showing, so anything arriving after the click stays
-    unread. It can't be undone.
-  - **Hide** is **Hide desk**: each one becomes a pill under the storey.
-    There is no bulk unhide; each desk comes back from its own pill.
+- **Hide desk** (on a desk's nameplate) puts a desk away as a small pill; click
+  the pill to bring it back.
+- **Move to another floor** moves an agent without hunting for its folder.
+- **Edit avatar** renames an agent and changes its look, on every floor it sits.
+- **put away** on a floor archives it for everyone. It becomes a pill at the
+  bottom of the building, and clicking the pill restores it. It also comes back
+  by itself when an agent starts on it.
 
-  While a room is selecting, a click anywhere on a desk checks or unchecks
-  it: nothing rings, nothing opens, and in the building nothing takes you to
-  the floor. Picking an action ends the selection: once it has been sent
-  (or, for **Meeting room**, once its window has opened) the room is back
-  as it was, and anything still on its way carries on. If an action did not
-  reach a desk, the room keeps one line under its header that counts the
-  desks and names the ones missed (*"nudge: 3 nudged · 1 not nudged —
-  cy"*), with each reason on hover. Click the line to dismiss it. When
-  every desk was reached, nothing is left behind. **done selecting** leaves
-  the selection without doing anything.
-- **Edit avatar.** Rename an agent and pick its look: gender, shirt, hair,
-  skin. The name and the look belong to the *agent*, not to one desk, so a
-  company agent edited here changes on every floor it sits — which is the
-  point: you recognize a teammate at a glance, wherever they are. The board's
-  agent rows open the same editor.
-- **View, close and reassign what's pending.** On the board, the unread and
-  task counts on an agent's row are buttons: the unread count opens the
-  waiting messages themselves (and can mark them read), the task count opens
-  the task list, where a task can be closed with a note or reassigned. See
-  *Operator actions* below for what each of those does and doesn't do.
-- **Saved prompts.** The button beside the composer is your library of the
-  messages you send over and over. Picking one inserts it at the cursor —
-  nothing is sent until you send — and **Manage…** adds, edits and deletes.
-  The library is board-wide, not per-channel, and it travels in backups.
-- **Stop a working agent.** The octagon beside **Send** interrupts the turn.
-  It is Claude Code's own interrupt, the same as Escape in a terminal, so the
-  turn ends where it is, anything already written or run stays, and the
-  conversation is open to say what to do instead. The transcript records
-  `[Request interrupted by user]`, so the agent knows it was stopped rather
-  than finished. **Cancel** on a permission prompt is a refusal that also
-  stops the turn.
+## The board view
 
-## Operator actions
+The **board / floor** switch shows the same company as rows: each agent's
+presence, its status with how old that status is, and its unread messages and
+tasks. Under them, the activity log lists every message, task and contract
+change, newest first; click a row to read it in full.
 
-Sooner or later the board shows something only a human can resolve: an agent
-whose window you closed days ago, still holding 139 unread; a task nobody will
-ever claim; a channel you created by typo. Hover a row and you get the small
-set of actions for that: the unread and task counts become buttons that open
-the pending messages and tasks themselves, and a trash can appears on each
-agent row (the channel header gets its own).
+<img src="images/board-card.png" width="470" alt="A channel on the board: green presence dots, status chips with their ages, unread and task counts">
 
-Nothing here is a new power. `complete_task` has never had an ownership check
-and `poll_messages` has always taken an `agent` override, so any connected
-agent could already close anyone's task and advance anyone's cursor. These
-buttons make that deliberate, attribute it to `operator`, and write it where
-the log can show it.
+![The activity log: messages, task changes and contract versions, newest first](images/board-activity.png)
+
+A status an agent sets expires after fifteen minutes, so a crashed agent can't
+leave "working" up forever. The board never reads silence as anything.
+
+### What only you can do
+
+Hover an agent on the board and its counts become buttons:
 
 | Action | What it does |
 | --- | --- |
-| **Mark read** | Advances that agent's `poll_cursor`, clamped with `MAX()` so it can only move forward. The agent never sees the messages. Cosmetic in one specific sense: delivery is driven by the `since` each agent passes itself, so the cursor is what the *board* counts, not what the agent can still fetch. |
-| **Close / reassign a task** | Marks it done with a note, or moves the assignee. Never deletes — the row stays `done` and the log keeps the record. |
-| **Remove an agent** | Clears its backlog, closes its live MCP sessions, and hides the row behind a `retired` chip. |
-| **Archive a channel** | Puts it away for everyone — off the board, the floor, the picker, the filter and the Floor dropdown — and says so in the log. Nothing is deleted and agents on it keep working. It stays as a pill at the bottom of both views, and the pill restores it. Reachable from the floor too: **put away** on a storey, under "all floors", opens this same dialog. |
-| **Delete a channel** | Permanent. Sweeps messages, tasks, contracts and contract history in one transaction; guarded by having to type the channel name. |
+| **Mark read** | Clears the agent's unread count. |
+| **Close / reassign a task** | Marks it done with a note, or gives it to someone else. Nothing is deleted. |
+| **Remove an agent** | Takes it off the board. If it is still running, it comes back by itself. |
+| **Archive a channel** | Puts a floor away for everyone; the pill restores it. |
+| **Delete a channel** | Permanent, and you type its name to confirm. The activity log keeps the record. |
 
-Two behaviours worth knowing before you use them:
+Every one of these is written to the activity log as yours.
 
-**A removed agent comes back by itself.** Retiring closes its sessions, and an
-unknown session id answers `404` — the spec's cue to re-initialize — so a
-window that is genuinely still alive reconnects and un-retires itself within a
-turn. Only one that is really gone stays gone. This is deliberate: an agent
-that is working while invisible on the board is a worse failure than a
-cluttered board. The flip side is that "remove" is not how you stop an agent;
-close its window.
+## Settings and updates
 
-**Retired agents and archived channels are hidden, never dropped.** A retired
-agent keeps a count on screen (`1 retired`) that reveals it again; an archived
-channel is a pill at the bottom of the board, with its unread count on it.
-Silently omitting a row would make the board lie, which is the one thing it
-must not do.
+The app updates itself: a new version installs when you restart it, or right
+away with **Restart to Update**. If a Claude Code update changes something the
+floor relies on, a banner at the top of the floor says so.
 
-The floor says the same thing in its own vocabulary. A channel put away is not
-a storey in the building and is not in the floor picker; it is a pill under
-"all floors", the same pill the board draws, and clicking it there restores it
-too. The floor can put one away as well — **put away** on a storey, under "all
-floors", opens the board's channel dialog — so there is one archive, reached
-from either view. The two views agree on which floors exist: the board's
-channel list and the floor's are one list (a desk made by a hook event alone
-counts as a channel on both), so a floor archived from the floor is a pill on
-the board, and the two totals count the same set.
+**Settings** (⚙) holds the app's appearance (light, dark, or follow the
+system), where new floors open, auto-refresh, and your backups: export, recover
+the whole board, or bring over one floor. See
+[Backups & migration](backup-and-migration.md). Running from source? Updating
+is in [Run it from source](run-from-source.md#keeping-it-current).
 
-Archived is a shared statement, so it is out of the floor's totals and out of
-the operator queue: the count of floors in this building is the same number
-for everyone looking at it, and a prompt in a room the team has put away
-should not read as "1 need you". A floor you were standing on that gets
-archived — by you or by anyone — lands you on all floors at the next poll.
+## Your editor, if you want it
 
-**An archived floor comes back by itself when something starts on it.** A
-desk taken there from Take a desk, a session connecting under its name, a
-window opening on it — any of these restores the floor, and the log says
-what brought it back and who. Only a start counts: an agent already on the
-floor keeps working without bringing it back, because archive is not a
-session kill and the work it does not kill does not undo it.
-
-**A hidden desk does not.** The same flag one level down — **Hide desk** on
-a nameplate card — is cleared only by clicking its pill under the storey.
-None of the doors above touch it, and the agent coming back does not either;
-a desk you put away stays away until you say otherwise. Archive still wins:
-a hidden desk on a put-away floor is neither a desk nor a pill until the
-floor is back, because the pills live inside the storey.
-
-Deleting a channel removes it from the board but **not** from the activity
-log: `admin_events` is deliberately not swept, because an audit trail you can
-erase by deleting the thing it describes isn't one. The log goes on saying you
-deleted it, and what it contained.
-
-What guards these routes — and, deliberately, what doesn't — is described in
-[the security model](security.md).
-
-## Keeping it current
-
-The header shows **Update available** when the branch the board follows has a
-commit this build lacks. The board checks once a day, and only when it runs
-from `docker-compose.yml`. The check asks GitHub's public API about this
-repository, and nothing about your work is sent.
-
-**Update** says what it will interrupt. Then the host on the board's machine
-fetches the commit, rebuilds the server, updates the plugin when its hooks
-changed, and restarts itself, and the page reloads onto the new build. It is
-refused, in words, when the clone has local changes, is on another branch
-than the one followed, or has commits that branch lacks; when the host is not
-running as its LaunchAgent; or when the board is not running in Docker.
-Nothing is stashed, reset or switched to make it fit. A build that fails puts
-the clone back where it was, so the clone and the running board agree. A run
-that stops after the server was rebuilt (the plugin update failed, say)
-leaves **Update stopped** in the header, and **Finish the update** runs what
-is left.
-
-**Settings** (⚙ in the header) turns the daily check off, after which only
-**Check now** contacts GitHub. It also switches to the development version
-(`develop` instead of `main`). The settings are the board's, so every browser
-sees the same ones. GitHub allows sixty unauthenticated checks an hour, so
-**Check now** asks at most once a minute and otherwise answers from the last
-check.
-
-Updating is macOS-only for now, because it relies on launchd to start the
-host again.
+**Open in VS Code** or **Open in Claude** moves a conversation to your editor
+or a terminal, with everything you did on the floor. Your next message from
+the floor brings it back. While an editor has a conversation, its desk says so,
+and anything it asks is answered there.

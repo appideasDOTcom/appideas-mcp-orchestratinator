@@ -1,14 +1,17 @@
 # Backups & migration
 
-The **⚙** in the top bar opens one panel: export and restore. There is nothing
-to unlock — see [what guards operator actions](security.md#what-guards-operator-actions)
-for the only check these routes make.
+Your board's backups live in **Settings** (⚙): export it, recover from a
+backup, or bring one floor over from another board. In the app, ⚙ opens the
+app's Settings. There is nothing to unlock; see
+[what guards operator actions](security.md#what-guards-operator-actions).
+
+<img src="images/settings-recover.png" width="552" alt="Settings: Recover from a backup with a file loaded and what it holds, and Or bring over one floor with its floor picker">
 
 ## Export
 
 **Export** downloads the whole board as one JSON file: every message, task,
 contract with its version history, agent, channel flag, and operator-action
-record. JSON rather than a copy of the SQLite file on purpose — it can be
+record, hidden desks, faces and saved prompts. JSON rather than a copy of the SQLite file on purpose — it can be
 opened, diffed and grepped, and it loads into a build whose schema has moved on
 (unknown columns are reported and skipped rather than fatal).
 
@@ -41,9 +44,18 @@ A backup taken by a version that still had dashboard accounts restores fine.
 Its `users` table is ignored rather than written, and the report says so rather
 than dropping it on the floor in silence.
 
+## Bring over one floor
+
+**Or bring over one floor**, under Recover, takes a single floor from a backup
+file and puts it in place of that floor here. Every other floor stays as it is.
+
 ## Moving to a permanent host
 
-The whole point of the above. On the new host:
+**With the app:** export on the old computer, install the app on the new one,
+and **Recover** the file there. Then **Take a desk** on each project folder;
+a folder that belonged to the old board is moved over in the same click.
+
+**With a Docker board:** on the new host,
 
 1. Copy `docker-compose.yml` and write a `.env` with **the same
    `ORCH_AUTH_TOKEN`** as the old one — that part does not travel in the

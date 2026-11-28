@@ -23,7 +23,8 @@ import { createHash, timingSafeEqual } from 'node:crypto';
  *             rollout mode: restart the server in `warn`, watch the log until
  *             no agent is failing, then flip to `enforce`. It means bringing
  *             auth up can't strand an agent that's mid-task on an old config.
- *   enforce — a bad or missing key is 401.
+ *   enforce — a bad or missing key is refused: 503 on /mcp (see mcpGuard for
+ *             why not 401), 401 on /api/ingest.
  */
 
 /** Clients send the secret here. `Authorization: Bearer <token>` also works. */
@@ -97,6 +98,13 @@ export function createAuth({ env = process.env } = {}) {
     if (String(req.headers['sec-fetch-site'] ?? '') === 'cross-site') return false;
     const origin = header(req, 'origin');
     if (!origin) return true;
+    // A relayed request (src/relay.js) reached the board on loopback, so its
+    // Host is the hop's, not the page's: the public origin it was served from
+    // is in its signed identity, and that is the one to match. The relay's
+    // own check has already refused any other Origin (relay_cross_origin),
+    // so this is the second guard, and a mutant reading `true` here survives
+    // test:service by design; the mutant that drops the line does not.
+    if (req.relay) return origin === req.relay.origin;
     try { return new URL(origin).host === req.headers.host; } catch { return false; }
   }
 
@@ -129,7 +137,15 @@ export function createAuth({ env = process.env } = {}) {
       return next();
     }
     warn(`mcp:${who}`, `[orchestratinator] auth DENY: ${who} sent no valid ${AUTH_HEADER}`);
-    return res.status(401).json({
+    // 503, not 401 (desktop-dev's M3 walk, measured on Claude Code 2.1.331):
+    // Claude Code remembers a 401/403 on an MCP server as "needs
+    // authentication" under the server's NAME for the whole configuration,
+    // and every board's binding on a computer is called orchestratinator.
+    // So one board's wrong key (a re-created board, a stale binding on a
+    // port another board now holds) marked every board on that computer as
+    // needing auth. A 503 is read as "failed" and not remembered; the body
+    // still says which header to set. The hook's /api/ingest keeps its 401.
+    return res.status(503).json({
       jsonrpc: '2.0',
       id: null,
       error: {

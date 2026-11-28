@@ -1,0 +1,198 @@
+[
+ [
+  "relay: a forged header is served as local when no secret is set",
+  "service",
+  "src/relay.js",
+  "  if (!secret) return refuse('relay_not_configured',",
+  "  if (!secret) return { payload: null }; if (false) return refuse('relay_not_configured',"
+ ],
+ [
+  "relay: the signature is not checked",
+  "service",
+  "src/relay.js",
+  "  if (!got || !timingSafeEqual(want, got)) return refuse(",
+  "  if (false) return refuse("
+ ],
+ [
+  "relay: the HMAC key is the decoded secret",
+  "service",
+  "src/relay.js",
+  "createHmac('sha256', secret).update(raw, 'utf8')",
+  "createHmac('sha256', /^[0-9a-f]+$/.test(secret) ? Buffer.from(secret, 'hex') : secret).update(raw, 'utf8')"
+ ],
+ [
+  "relay: no freshness window",
+  "service",
+  "src/relay.js",
+  "  if (Math.abs(now - p.iat) > IAT_WINDOW_MS)",
+  "  if (false)"
+ ],
+ [
+  "relay: any role is served",
+  "service",
+  "src/relay.js",
+  "  if (!ROLES.has(p.role))",
+  "  if (false)"
+ ],
+ [
+  "relay: Origin is not compared",
+  "service",
+  "src/relay.js",
+  "  if (reqOrigin != null && reqOrigin !== origin)",
+  "  if (false)"
+ ],
+ [
+  "relay: an origin with a path is taken",
+  "service",
+  "src/relay.js",
+  "    return u.origin === v ? v : null;",
+  "    return v;"
+ ],
+ [
+  "relay: local-only routes are served remotely",
+  "service",
+  "src/relay.js",
+  "    if (refusal) return res.status(409)",
+  "    if (false) return res.status(409)"
+ ],
+ [
+  "relay: a short secret is accepted",
+  "service",
+  "src/relay.js",
+  "  if (secret && secret.length < SECRET_MIN) {",
+  "  if (false) {"
+ ],
+ [
+  "relay: the startup line prints the secret",
+  "service",
+  "src/relay.js",
+  "`relay     ON (secret set, ${secret.length} chars)`",
+  "`relay     ON (secret set, ${secret.length} chars) ${secret}`"
+ ],
+ [
+  "csrf: a relayed request's Origin is compared with Host",
+  "service",
+  "src/auth.js",
+  "    if (req.relay) return origin === req.relay.origin;",
+  ""
+ ],
+ [
+  "audit: the remote operator is not named",
+  "service",
+  "src/db.js",
+  "    if (remote) actor = `${remote.name} (remote)`;",
+  ""
+ ],
+ [
+  "buildings: the default can be deleted",
+  "service",
+  "src/db.js",
+  "    if (b.is_default) return { error:",
+  "    if (false) return { error:"
+ ],
+ [
+  "buildings: a building with floors is deleted",
+  "service",
+  "src/db.js",
+  "    if (floors.length) return { error:",
+  "    if (false) return { error:"
+ ],
+ [
+  "buildings: names collide in another case",
+  "service",
+  "src/db.js",
+  "SELECT id, name FROM buildings WHERE name = ? COLLATE NOCASE",
+  "SELECT id, name FROM buildings WHERE name = ?"
+ ],
+ [
+  "buildings: a one-floor restore takes the file's building",
+  "service",
+  "src/db.js",
+  "    if (hereBuilding) {\n      db.prepare(",
+  "    if (false) {\n      db.prepare("
+ ],
+ [
+  "buildings: a floor naming an unknown building is lost",
+  "service",
+  "src/db.js",
+  "      out.set(c, b && known.has(b) ? b : def);",
+  "      out.set(c, b ?? def);"
+ ],
+ [
+  "buildings: not in a backup",
+  "service",
+  "src/db.js",
+  "  'channel_flags',\n  'buildings',",
+  "  'channel_flags',"
+ ],
+ [
+  "page: a floor filed nowhere is hidden",
+  "service",
+  "src/ui/app.js",
+  "function inBuildingNow(c, id) { return !id || !c?.building || c.building === id; }",
+  "function inBuildingNow(c, id) { return !id || c?.building === id; }"
+ ],
+ [
+  "page: an unknown building is shown as asked",
+  "service",
+  "src/ui/app.js",
+  "  if (wanted && list.some((b) => b.id === wanted)) return wanted;",
+  "  if (wanted) return wanted;"
+ ],
+ [
+  "page: one building draws a picker",
+  "service",
+  "src/ui/app.js",
+  "  if (list.length < 2) return '';",
+  "  if (list.length < 1) return '';"
+ ],
+ [
+  "page: the pills ignore the building",
+  "service",
+  "src/ui/app.js",
+  "filter((c) => c.archived && inBuildingNow(c, b))",
+  "filter((c) => c.archived)"
+ ],
+ [
+  "headquarters: the first day's board keeps Main",
+  "service",
+  "src/db.js",
+  "    const renamed = db.prepare(\"UPDATE buildings SET name = ? WHERE is_default = 1 AND name = 'Main'",
+  "    const renamed = db.prepare(\"UPDATE buildings SET name = ? WHERE 0 AND is_default = 1 AND name = 'Main'"
+ ],
+ [
+  "headquarters: renamed at every start",
+  "service",
+  "src/db.js",
+  "  if (!db.prepare(\"SELECT 1 FROM settings WHERE key = 'migration.headquarters'\").get()) {",
+  "  if (true) {"
+ ],
+ [
+  "viewer: no machine named remotely",
+  "service",
+  "src/floor.js",
+  "{ remote: true, name: req.relay.name, machine: hostname() }",
+  "{ remote: true, name: req.relay.name }"
+ ],
+ [
+  "page: the composer takes a message while the board is down",
+  "service",
+  "src/ui/floor.js",
+  "const canChat = !!h?.live && !held && !ui.boardDown;",
+  "const canChat = !!h?.live && !held;"
+ ],
+ [
+  "page: board_offline read as no answer",
+  "service",
+  "src/ui/floor.js",
+  "    if (code === 'board_offline') return",
+  "    if (code === 'board_offline_x') return"
+ ],
+ [
+  "page: remotely, no machine on one building",
+  "service",
+  "src/ui/app.js",
+  "    return machine && one ? `<span class=\"bld-where\">${esc(one.name)} ${at}</span>` : '';",
+  "    return '';"
+ ]
+]

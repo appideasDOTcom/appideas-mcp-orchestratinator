@@ -4,7 +4,7 @@ import { SERVER_CHANNEL } from './auth.js';
 import {
   applyBackup, applyFloor, backupFilename, buildBackup, floorsIn, snapshotBeforeRestore, validateBackup,
 } from './backup.js';
-import { createFloorRouter, deliverable, nudgeable } from './floor.js';
+import { createFloorRouter, deliverable, nudgeable, viewerOf, guestOf, guestFloors } from './floor.js';
 // The same derivation the store uses, so a row for an agent with no persona row
 // yet shows the name it is about to be given rather than a raw id for one poll.
 import { humanName } from './db.js';
@@ -79,6 +79,7 @@ function buildState(store, sessions, sessionStats, meta) {
     store.listChannelFlags().filter((f) => f.archived_at).map((f) => [f.channel, f.archived_at])
   );
   const tasksByChannel = index(store.boardTasks(), (t) => t.channel);
+  const buildingOf = store.floorBuildings();
 
 
   // Channels known to the database, plus any a live session claims but that has
@@ -172,6 +173,7 @@ function buildState(store, sessions, sessionStats, meta) {
       personas,
       archived: archivedAt.has(channel),
       archived_at: iso(archivedAt.get(channel)),
+      building: buildingOf.get(channel) ?? null,
       connected: agents.filter((a) => a.presence === 'connected').length,
       agents,
       retired_agents: retiredAgents,
@@ -215,6 +217,7 @@ function buildState(store, sessions, sessionStats, meta) {
       now: new Date(nowMs).toISOString(),
     },
     sessions: liveSessions.sort((a, b) => (a.channel ?? '').localeCompare(b.channel ?? '')),
+    buildings: store.listBuildings(),
     // The colours a picker may offer, sent rather than hard-coded in the page:
     // the endpoint validates against this same list, so a swatch that appears
     // is a swatch that will save. Static and small — a few hundred bytes on a
@@ -401,6 +404,40 @@ function createAdminRouter({ store, auth, closeSessionsFor, meta }) {
       res.json({ ok: true, channel, agent, hidden });
     });
   }
+
+  /* ---------- buildings (the service round, 2026-11-24) ---------- */
+
+  // A bucket of floors (src/db.js, `buildings`). Each refusal is the store's
+  // sentence, said as it is: a 409 for a building that cannot go yet, a 400
+  // for a name, a 404 for an id this board does not have.
+  const buildingAnswer = (res, r) => {
+    if (!r.error) return res.json({ ok: true, ...r });
+    const status = r.code === 'no_building' ? 404 : r.code === 'bad_name' ? 400 : 409;
+    return res.status(status).json({ error: r.error, code: r.code, ...(r.floors ? { floors: r.floors } : {}) });
+  };
+  router.post('/building/create', (req, res) => buildingAnswer(res, store.createBuilding(req.body?.name)));
+  router.post('/building/rename', (req, res) => {
+    const id = str(req.body?.id);
+    if (!id) return bad(res, 'id is required');
+    return buildingAnswer(res, store.renameBuilding(id, req.body?.name));
+  });
+  router.post('/building/default', (req, res) => {
+    const id = str(req.body?.id);
+    if (!id) return bad(res, 'id is required');
+    return buildingAnswer(res, store.setDefaultBuilding(id));
+  });
+  router.post('/building/delete', (req, res) => {
+    const id = str(req.body?.id);
+    if (!id) return bad(res, 'id is required');
+    return buildingAnswer(res, store.deleteBuilding(id));
+  });
+  router.post('/floor/building', (req, res) => {
+    const channel = str(req.body?.channel);
+    const id = str(req.body?.building);
+    if (!channel || !id) return bad(res, 'channel and building are required');
+    if (!store.listAllChannels().includes(channel)) return missing(res, `no floor "${channel}" on this board`);
+    return buildingAnswer(res, store.setFloorBuilding(channel, id));
+  });
 
   /**
    * Permanent, unrecoverable deletion of everything on a channel. Guarded by
@@ -637,7 +674,7 @@ function createAdminRouter({ store, auth, closeSessionsFor, meta }) {
  * the operator's agent, on the operator's machine, reading what the operator
  * chose to give it.
  */
-export function createWebRouter({ store, sessions, sessionStats, meta, auth, closeSessionsFor, updates = null, uploads = null }) {
+export function createWebRouter({ store, sessions, sessionStats, meta, auth, closeSessionsFor, updates = null, uploads = null, files = null }) {
   const router = express.Router();
 
   // Update settings, Check now and Update (issue #40; src/updates.js). Ahead
@@ -646,10 +683,24 @@ export function createWebRouter({ store, sessions, sessionStats, meta, auth, clo
   router.use('/api/admin', createAdminRouter({ store, auth, closeSessionsFor, meta }));
   // The floor's own endpoints — ingest, state, per-desk turns, casting. Mounted
   // ahead of the static handler so /api/floor never falls through to index.html.
-  router.use(createFloorRouter({ store, auth, sessions, updates, uploads, protocol: meta.protocol, version: meta.version }));
+  router.use(createFloorRouter({ store, auth, sessions, updates, uploads, protocol: meta.protocol, version: meta.version, closeSessionsFor, files }));
 
-  router.get('/api/state', (_req, res) => {
+  router.get('/api/state', (req, res) => {
     const state = buildState(store, sessions, sessionStats, meta);
+    state.viewer = viewerOf(req);
+    const guest = guestOf(req);
+    if (guest) {
+      // A guest sees its card's buildings, and nothing of the machine the
+      // board runs on (board.relay v4, "guest scope").
+      const keep = guestFloors(store, guest, state.channels.map((c) => c.channel));
+      state.channels = state.channels.filter((c) => keep.has(c.channel));
+      state.sessions = state.sessions.filter((x) => keep.has(x.channel));
+      state.buildings = state.buildings.filter((b) => guest.buildings.includes(b.id));
+      state.server = { version: state.server.version, now: state.server.now };
+      const t = state.channels.filter((c) => !c.archived);
+      state.totals = { channels: t.length, agents: t.reduce((n, c) => n + c.agents.length, 0), connected: t.reduce((n, c) => n + c.connected, 0), live_sessions: state.sessions.length, open_tasks: t.reduce((n, c) => n + c.tasks.open, 0), claimed_tasks: t.reduce((n, c) => n + c.tasks.claimed, 0), archived_channels: state.channels.length - t.length, retired_agents: 0 };
+      return res.json(state);
+    }
     // The header's Update button and the settings' Updates section read this.
     if (updates) state.update = updates.view();
     res.json(state);
@@ -659,18 +710,34 @@ export function createWebRouter({ store, sessions, sessionStats, meta, auth, clo
   // one, which is rarely, and /api/state is polled every two seconds by both
   // surfaces. The picker fetches this when it opens and after the manager
   // changes something — the two moments the answer can actually differ.
-  router.get('/api/prompts', (_req, res) => {
-    res.json({ prompts: store.listSavedPrompts() });
+  // What the desktop app registers with the service (contract board.relay,
+  // "routes added"): each building's opaque id, its name, and its floors.
+  router.get('/api/buildings', (req, res) => {
+    const at = store.floorBuildings();
+    const guest = guestOf(req);
+    res.json({
+      buildings: store.listBuildings().filter((b) => !guest || guest.buildings.includes(b.id)).map((b) => ({
+        ...b,
+        floors: [...at].filter(([, id]) => id === b.id).map(([c]) => c),
+      })),
+    });
+  });
+
+  router.get('/api/prompts', (req, res) => {
+    // The library is the owner's own, board-wide: a guest has none here.
+    res.json({ prompts: guestOf(req) ? [] : store.listSavedPrompts() });
   });
 
   router.get('/api/activity', (req, res) => {
     const limit = Math.min(1000, Math.max(1, Number(req.query.limit) || 200));
     const offset = Math.max(0, Number(req.query.offset) || 0);
     const channel = req.query.channel ? String(req.query.channel) : null;
-    const rows = store.activity({ channel, limit, offset }).map((r) => ({
+    let rows = store.activity({ channel, limit, offset }).map((r) => ({
       ...r,
       ts: iso(r.ts),
     }));
+    const guest = guestOf(req);
+    if (guest) { const keep = guestFloors(store, guest, [...new Set(rows.map((r) => r.channel))]); rows = rows.filter((r) => keep.has(r.channel)); }
     res.json({ count: rows.length, limit, offset, channel, rows });
   });
 

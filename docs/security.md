@@ -6,6 +6,27 @@ deliberate trade for the shape this runs in — one machine, one person, one
 trusted network — and this page is where the trade is spelled out so you can
 decide whether it fits yours.
 
+## In the desktop app
+
+The app's board listens on this computer only (`127.0.0.1`), so nothing on
+your network can reach it. The app makes its own key and writes it into each
+desk it sets up; there is nothing to configure. The rest of this page is
+about the board you [run from source](run-from-source.md), which is published
+on your network by default.
+
+Whichever way you run it, anyone who can open the board can message a desk
+and answer its prompts. A desk runs in the permission mode you left its
+conversation in, or your Claude Code default, and otherwise in `auto`. Taking
+a folder onto the floor also adds one rule to that folder's
+`.claude/settings.local.json`, `mcp__orchestratinator`, so the board's own
+tools don't ask for permission there. Leave desk removes it.
+
+## The host only reaches out
+
+The host on each computer (the part that runs its desks' Claude Code) makes
+every connection itself, to the board. The board never connects to a
+computer, and nothing on a computer listens for it.
+
 ## The shared secret
 
 Every MCP client presents one shared key. It's a doorlock, not a security
@@ -37,7 +58,7 @@ floor, or the repo's `.mcp.json`), the host's `~/.orchestratinator/host.json`
 when it was installed with `--token`, and, since 0.12.9, one small file per
 extra desk an agent has in a folder that is already a desk
 (`~/.orchestratinator/seats/*.mcp.json`, mode 600; the binding that desk's
-window is started with). The host writes those itself, with the key it
+Claude Code is started with). The host writes those itself, with the key it
 already holds, and removes each when its desk is left. The board never
 sends a key to a host.
 
@@ -55,8 +76,12 @@ through**.
    appear — that means every live client is sending the key.
 4. Flip to `ORCH_AUTH_MODE=enforce`, `docker compose up -d`.
 
-A rejected client gets `401` with a JSON-RPC error explaining which header to
-set — it never reaches a tool and never appears on the dashboard.
+A rejected client gets `503` with a JSON-RPC error explaining which header to
+set — it never reaches a tool and never appears on the dashboard. `503`, not
+`401`: Claude Code remembers a `401` on an MCP server as "needs
+authentication" under the server's name, and every board's binding on a
+computer is called `orchestratinator`, so one board's wrong key would mark
+every board on that computer. The hook's `/api/ingest` still answers `401`.
 
 ## The dashboard is not guarded
 

@@ -584,7 +584,7 @@ pre.raw {
 .btn.update.busy { border-color: var(--busy); color: var(--busy); }
 .btn.update[hidden] { display: none; }
 .set-updates .set-h { margin-bottom: 6px; }
-.set-check { display: flex; gap: 8px; align-items: baseline; margin-top: 6px; font-size: 12.5px; }
+.set-check { display: flex; gap: 8px; align-items: baseline; margin-top: 10px; font-size: 12.5px; }
 .set-check input { accent-color: var(--accent); }
 .set-facts { display: grid; grid-template-columns: max-content 1fr; gap: 3px 12px; margin: 10px 0 0; font-size: 12.5px; }
 .set-facts dt { color: var(--muted); }
@@ -629,11 +629,11 @@ pre.raw {
   grid-template-columns: 1fr auto;
   gap: 14px;
   align-items: start;
-  margin-top: 14px;
-  padding-top: 14px;
+  margin-top: 18px;
+  padding-top: 18px;
   border-top: 1px solid var(--border);
 }
-.set-tool p { margin: 4px 0 0; font-size: 12.5px; }
+.set-tool p { margin: 6px 0 0; font-size: 12.5px; line-height: 1.5; }
 /* Outspecifying `.dlg h4`, which is red because the only h4 that existed before
    this panel was the delete-a-channel heading. Exporting destroys nothing and must
    not borrow that tone; the restore heading keeps it, because it does. */
@@ -672,10 +672,10 @@ pre.raw {
    the sections fill the view and scroll it, on the page's own background. */
 body.view-settings > :not(#set-page):not(script) { display: none !important; }
 .set-page.dlg {
-  width: auto; max-width: none; margin: 0; padding: 4px 20px 20px;
+  width: auto; max-width: none; margin: 0; padding: 12px 24px 28px;
   border: 0; border-radius: 0; box-shadow: none; background: var(--bg);
 }
-.set-page #set-body > .set-tool:first-child { border-top: 0; }
+.set-page #set-body > .set-tool:first-child { border-top: 0; margin-top: 0; }
 
 /* ─── The floor ───────────────────────────────────────────────────────────────
    A second view of the same data. Everything here is scoped under #floor or
@@ -2073,3 +2073,82 @@ body.meeting .deskpanel { display: flex; flex-direction: column; }
 .canary-warn ul { margin: 4px 0 0 18px; padding: 0; }
 .canary-warn li { margin: 2px 0; }
 .canary-warn .mono { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+
+/* Buildings (the service round, 2026-11-24): the header's picker and the
+   Settings section. */
+#building-pick:empty { display: none; }
+#building-pick a.chip { text-decoration: none; display: inline-block; }
+/* The Settings section, as costmo drew it on 2026-11-27: a row is the
+   default's checkmark, the name, its floor count, and two icons. Rows are
+   given room top and bottom: his note was that elements sat too close. */
+.ibtn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; padding: 0; flex: none;
+  border: 1px solid transparent; border-radius: 6px;
+  background: none; color: var(--muted); cursor: pointer;
+}
+.ibtn svg { width: 16px; height: 16px; }
+.ibtn:hover:not(:disabled), .ibtn:focus-visible { color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.ibtn:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); outline-offset: 1px; }
+.ibtn:disabled { opacity: .35; cursor: default; }
+.ibtn.danger:hover:not(:disabled), .ibtn.danger:focus-visible { color: var(--block); background: color-mix(in srgb, var(--block) 10%, transparent); }
+.ibtn.ok { color: var(--idle); }
+.ibtn.add { width: 30px; height: 30px; margin-left: auto; color: var(--accent); }
+.ibtn.add svg { width: 22px; height: 22px; }
+.ibtn.fold svg { transition: transform .15s ease; }
+.set-buildings.folded .ibtn.fold svg { transform: rotate(-90deg); }
+.ibtn.bld-default { border-color: var(--border); color: transparent; }
+.ibtn.bld-default:hover:not(:disabled) { color: color-mix(in srgb, var(--idle) 55%, transparent); border-color: var(--idle); background: none; }
+.ibtn.bld-default.on { opacity: 1; color: #fff; background: var(--idle); border-color: var(--idle); }
+.ibtn.bld-default.placeholder { visibility: hidden; }
+.set-tool.set-buildings { display: block; }
+.set-buildings .set-bld-head { display: flex; align-items: center; gap: 8px; }
+.set-buildings .set-bld-head .set-h { cursor: pointer; user-select: none; }
+.set-buildings .bld-total { font-weight: 400; margin-left: 4px; }
+.set-buildings .set-bld-body > p { margin: 8px 0 4px; }
+.set-buildings .set-bld-list { margin-top: 10px; }
+.set-buildings .set-bld { display: flex; gap: 10px; align-items: center; min-height: 40px; padding: 6px 4px; border-top: 1px solid var(--border); }
+.set-buildings .set-bld:first-child { border-top: 0; }
+.set-buildings .set-bld .bld-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.set-buildings .set-bld .bld-name-input { flex: 1; min-width: 0; }
+.set-buildings .set-bld .bld-count { margin: 0; white-space: nowrap; }
+.set-buildings .set-bld .bld-acts { display: flex; gap: 4px; }
+.set-buildings .set-bld-sub { margin-top: 18px !important; margin-bottom: 6px !important; }
+.set-buildings .set-bld-floor { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 5px 4px; }
+.set-buildings .set-bld-floor select { max-width: 50%; }
+.set-buildings .set-bld-err { margin-top: 10px; }
+.bld-where { white-space: nowrap; }
+.bld-at { margin-left: 4px; white-space: nowrap; }
+/* The board does not answer: one line over the page, and the floor dimmed
+   so its desks do not read as live (costmo, 2026-11-25). */
+.board-down-bar { margin: 8px 18px 0; padding: 8px 12px; border: 1px solid var(--busy); border-radius: 6px; color: var(--busy); background: var(--busy-bg); }
+body.board-down #floor-rooms, body.board-down .meet-boxes { opacity: 0.45; }
+
+/* The boards this operator was invited into (costmo, 2026-11-27): outline
+   buttons under the header. The outline says the state, and so does a glyph,
+   since a colour alone is not read by everyone. */
+.guest-boards { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 18px 2px; }
+.guest-boards[hidden] { display: none; }
+.gb { display: inline-flex; }
+.gb-open {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 5px 10px 5px 8px; border: 1.5px solid var(--off); border-radius: 999px;
+  background: var(--surface); color: var(--text); font: inherit; font-size: 12.5px; cursor: pointer;
+}
+.gb-open:hover { background: color-mix(in srgb, var(--accent) 8%, var(--surface)); }
+.gb-open:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); outline-offset: 2px; }
+.gb-glyph {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px; border-radius: 50%; font-size: 10.5px; font-weight: 700; line-height: 1;
+  color: #fff; background: var(--off);
+}
+.gb-label { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gb-win { color: var(--muted); font-size: 12px; }
+.gb.available .gb-open { border-color: var(--idle); }
+.gb.available .gb-glyph { background: var(--idle); }
+.gb.blocked .gb-open { border-color: var(--block); }
+.gb.blocked .gb-glyph { background: var(--block); }
+.gb.here .gb-open { cursor: default; border-style: solid; background: color-mix(in srgb, var(--accent) 7%, var(--surface)); font-weight: 600; }
+.gb.here .gb-open:hover { background: color-mix(in srgb, var(--accent) 7%, var(--surface)); }
+.gb.here .gb-win { font-size: 11px; font-weight: 400; text-transform: uppercase; letter-spacing: .04em; }
+.gb-input { width: 200px; font-size: 12.5px; padding: 4px 10px; border-radius: 999px; }

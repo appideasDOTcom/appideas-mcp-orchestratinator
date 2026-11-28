@@ -1289,6 +1289,11 @@
       const i = s.startsWith(`${h}\n`) ? 0 : s.lastIndexOf(`\n\n${h}\n`);
       if (i > at) { at = i; header = h; }
     }
+    // And a list another agent's send_file attached (board.files): "Attached
+    // by qa:", the agent's name in place of "the operator".
+    for (const m of s.matchAll(/(^|\n\n)(Attached by [^\n:]{1,80}:)\n/g)) {
+      if (m.index > at) { at = m.index; header = m[2]; }
+    }
     if (at < 0) return { text: s, files: [] };
     const listAt = at === 0 ? 0 : at + 2;
     const lines = s.slice(listAt + header.length + 1).replace(/\n+$/, '').split('\n');
@@ -1699,7 +1704,9 @@
   /** A desk's state, in the one word the room is drawn from. */
   function deskState(d) {
     if (!d.live) return 'away';
-    if (d.session?.awaiting_kind) return 'needs-you';
+    // Another operator's desk asking is waiting on them, not on this viewer
+    // (`mine`, board.relay v6): drawn as busy, never as needs-you.
+    if (d.session?.awaiting_kind) return d.mine === false ? 'working' : 'needs-you';
     // The server's answer, not a second reading of the same two columns. It
     // used to be `hosted.state === 'working' || last_turn.role === 'tool'` right
     // here, which was fine until the stop sign needed the same fact: a desk
@@ -4075,6 +4082,51 @@
   // `desk` names whose turn this is, for a transcript holding several desks'
   // (a meeting room, issue #44): it stands where "agent" would, and ahead of
   // every quiet line. The panel and a popout hold one desk and pass none.
+  /**
+   * Who a user turn is from (board.relay v4, attribution). A message from
+   * anyone but the desk's own operator carries its sender (`from`, split off
+   * by the board); one without is the desk's own operator's. "you" is the
+   * viewer: its own name, or, for an unattributed turn, a desk that is the
+   * viewer's own.
+   */
+  function userSpeaker(t) {
+    const v = floor.viewer ?? { remote: false };
+    if (t.from) return v.name && t.from === v.name ? 'you' : t.from;
+    if (!v.remote || v.role !== 'guest') return 'you';
+    const d = ui.open ? floor.channels?.find((c) => c.channel === ui.open.channel)?.desks.find((x) => x.agent === ui.open.agent) : null;
+    const op = d?.hosted?.operator ?? null;
+    return op && op.op === v.op ? 'you' : (op?.name ?? floor.owner ?? 'the owner');
+  }
+
+  /**
+   * A prompt on another operator's desk is shown, never answered from here:
+   * its buttons and fields go dim, and one line says who answers it (the
+   * board refuses an answer with desk_not_yours). Run after every drawAlert,
+   * since drawAlert redraws only when the prompt changes.
+   */
+  function notMyPrompt(slot, d) {
+    if (!slot) return;
+    const theirs = !deskMine(d) && !!slot.querySelector('button, input, textarea, select');
+    for (const el of slot.querySelectorAll('button, input, textarea, select')) if (theirs) el.disabled = true;
+    let note = slot.querySelector('.p-notmine');
+    if (theirs && !note) {
+      note = document.createElement('div');
+      note.className = 'p-notmine muted';
+      slot.append(note);
+    }
+    if (note) {
+      if (theirs) note.textContent = `${d.hosted?.operator?.name ?? floor.owner ?? 'The board owner'} answers ${d.persona}'s prompts.`;
+      else note.remove();
+    }
+  }
+
+  /** Whether the desk's own controls are the viewer's (board.relay v4, desk ownership). */
+  function deskMine(d) {
+    const v = floor.viewer ?? { remote: false };
+    const op = d?.hosted?.operator?.op ?? null;
+    return op === (v.role === 'guest' ? v.op : null);
+  }
+
   function turnNode(t, desk = null) {
     const div = document.createElement('div');
     div.dataset.id = t.id;
@@ -4132,7 +4184,7 @@
     // the editor shows them under the Agent call for the same reason — but
     // "agent" alone would have the desk appear to change subject mid-thought.
     const speaker = desk ?? 'agent';
-    const who = t.role === 'user' ? 'you' : t.role === 'assistant' ? (t.via ? `${speaker} · ${t.via}` : speaker) : `${by}${t.role}`;
+    const who = t.role === 'user' ? userSpeaker(t) : t.role === 'assistant' ? (t.via ? `${speaker} · ${t.via}` : speaker) : `${by}${t.role}`;
     div.className = `t t-${esc(t.role)}`;
     // Only the agent's own messages are read as markdown. What the operator
     // typed comes back exactly as typed — the compose box is a plain textarea,
@@ -4672,7 +4724,7 @@
     const held = h?.held === 'editor';
     // Deliberately looser than the bell: a message may open a window, so a desk
     // with none is still worth typing into. See nudgeable() on the server.
-    const canChat = !!h?.live && !held;
+    const canChat = !!h?.live && !held && !ui.boardDown;
     wrap.querySelector('.p-persona').textContent = d.persona;
     wrap.querySelector('.p-meta').textContent = panelMeta(d);
     // The model and effort controls: the window's confirmed value selected,
@@ -4688,7 +4740,9 @@
       // door (sendChat), which sends nothing while the window is asking
       // something, and a control that takes a pick and drops it is worse
       // than one that says it cannot take one.
-      const why = selectBlock(canChat, held, d.nudge?.code === 'asking', d.persona);
+      const why = !deskMine(d)
+        ? `${d.persona}'s model and effort are ${d.hosted?.operator?.name ?? floor.owner ?? 'the board owner'}'s to change`
+        : selectBlock(canChat, held, d.nudge?.code === 'asking', d.persona);
       // While a change is asked for, the select shows it rather than snapping
       // back to the old value until the window confirms; the asked-for note
       // beside it says which it is.
@@ -4706,6 +4760,7 @@
     }
 
     drawAlert(wrap.querySelector('.p-alert-slot'), d, channel, agent, canChat);
+    notMyPrompt(wrap.querySelector('.p-alert-slot'), d);
 
     // The window is asking something: a message is taken all the same and
     // held behind the prompt until it is answered (F17, costmo 2026-11-23),
@@ -4716,8 +4771,12 @@
     // Claude Code signed out on the desk's host: refused by the board in the
     // same words (signedOutWhy), and the Sign in box is above.
     const signedOut = canChat && d.nudge?.code === 'signed_out';
-    $('p-text').placeholder = asking
-      ? (holds ? `${d.persona} is asking something above — a message sent now reaches it once you answer…` : `${d.persona} is asking something — answer it above, then type here…`)
+    $('p-text').placeholder = ui.boardDown
+      ? ui.boardDown
+      : asking
+      ? (!deskMine(d)
+        ? `${d.persona} is asking ${d.hosted?.operator?.name ?? floor.owner ?? 'the board owner'} something — a message sent now reaches it once they answer…`
+        : holds ? `${d.persona} is asking something above — a message sent now reaches it once you answer…` : `${d.persona} is asking something — answer it above, then type here…`)
       : signedOut
       ? `Claude Code is signed out on ${d.signin?.host ?? 'this desk\u2019s machine'} — sign in above, then type here…`
       : canChat
@@ -4910,12 +4969,34 @@
       toClaude.classList.add('hidden');
       tmuxCmd.classList.add('hidden');
     }
+    // Seen through the service (contract board.relay), the editor and a
+    // terminal would open on the board machine's own screen, where the person
+    // looking is not, and the board refuses both (relay_local_only). Absent,
+    // not dimmed: nothing about this desk makes them pressable from here.
+    if (floor.viewer?.remote) {
+      toVsc.classList.add('hidden');
+      toClaude.classList.add('hidden');
+    }
+    // Another operator's desk (board.relay v4): its seat, its conversations
+    // and its stop sign are that operator's, and the board refuses them
+    // (desk_not_yours). Absent, or dimmed with whose they are; the message
+    // box stays, since talk runs both ways.
+    const notMine = !deskMine(d);
+    if (notMine) {
+      const whose = d.hosted?.operator?.name ?? floor.owner ?? 'the board owner';
+      stopBtn.disabled = true;
+      stopBtn.title = `Only ${whose} can stop ${d.persona}`;
+      stopBtn.setAttribute('aria-label', stopBtn.title);
+    }
     // The picker wants a live host — the list and the reopen are its work —
     // and nothing else: an editor holding the conversation is a fact the
     // dialog shows on the rows, not a reason to hide the door. Held flat
     // while a move or another reopen is on its way.
     toSessions.classList.toggle('hidden', !h?.live || !!move);
     toSessions.disabled = !!reopening;
+    // Last, so no toggle above puts one back: another operator's desk has no
+    // seat links, Sessions or Leave here (board.relay v5).
+    if (notMine) for (const el of [toVsc, toClaude, toFloor, toSessions, toLeave]) el?.classList.add('hidden');
     setLinkBusy(toVsc, move?.act === 'handback');
     setLinkBusy(toFloor, move?.act === 'openhere');
     setLinkBusy(toTmux, !!attaching && attachAct === 'attach');
@@ -4946,7 +5027,12 @@
     // append to one transcript while keeping separate context — so the honest
     // report is the count, not a guess at which one you are looking at.
     const holders = h?.holders ?? 0;
-    wrap.querySelector('.p-hint').innerHTML = holders > 1
+    // While the board does not answer, nothing about the desk is known: the
+    // line over the page and the box say so, and the hint does not guess at
+    // its host (it read "offline" for a host nobody had heard from).
+    wrap.querySelector('.p-hint').innerHTML = ui.boardDown
+      ? ''
+      : holders > 1
       ? `<b>${holders} processes hold this conversation.</b> They share its transcript but not their context, and the floor types into whichever it found first. Close all but one.`
       : held
       ? `Open in your editor${h.held_pid ? ` (pid ${h.held_pid})` : ''}. Close it there, or move it back with the link below — one app holds a conversation at a time.`
@@ -5136,10 +5222,15 @@
       // After a while the button is back beside the spinner: a sign-in that
       // failed says so in the conversation, and the remedy is pressing again.
       const again = waiting && Date.now() - pressed > SIGNIN_AGAIN_MS;
-      const sig = `signin|${si.ok}|${si.reason ?? ''}|${si.host}|${waiting}|${again}`;
+      // Seen through the service, the sign-in's browser would open on the
+      // host's screen, where the person looking is not (relay_local_only):
+      // dimmed, with that said, rather than a press the board refuses.
+      const remote = !!floor.viewer?.remote;
+      const sig = `signin|${si.ok}|${si.reason ?? ''}|${si.host}|${waiting}|${again}|${remote}`;
       if (alertSlot.dataset.sig !== sig) {
         alertSlot.dataset.sig = sig;
-        const button = `<button class="btn${waiting ? '' : ' primary'}" data-act="signin"${si.ok ? '' : ' disabled'} title="Claude Code\u2019s own sign-in, run on ${esc(si.host)}: the browser opens there">${waiting ? 'Sign in again' : 'Sign in'}</button>`;
+        const signTitle = remote ? `Sign in opens a browser on ${si.host}, and you are not at it. Sign in there when you are back.` : `Claude Code\u2019s own sign-in, run on ${si.host}: the browser opens there`;
+        const button = `<button class="btn${waiting ? '' : ' primary'}" data-act="signin"${si.ok && !remote ? '' : ' disabled'} title="${esc(signTitle)}">${waiting ? 'Sign in again' : 'Sign in'}</button>`;
         alertSlot.innerHTML = `<div class="p-alert p-alert-ask p-signin">
              <div><b>Claude Code is signed out on ${esc(si.host)}</b> \u2014 its Claude Code cannot answer until it is signed in again.</div>
              ${waiting ? `<div class="p-reading"><span class="pspin" aria-hidden="true"></span>finish signing in, in the browser that opened on ${esc(si.host)}\u2026</div>` : ''}
@@ -5526,6 +5617,20 @@
     return `?${q}`;
   }
 
+  /**
+   * What the page says when its board does not answer (costmo, 2026-11-25:
+   * with the board's app quit, a page through the service still showed its
+   * desks live and took a message, which came straight back to the box). The
+   * page then says this over the floor and in the box, and sends nothing,
+   * until a poll answers again. The service's own codes (service.tunnel) are
+   * read where they say more than "no answer".
+   */
+  function boardDownWords(status, code) {
+    if (code === 'board_offline') return 'This board\u2019s computer is offline, or its Orchestratinator app was quit. Nothing can be sent until it is back.';
+    if (code === 'session_required' || status === 401) return 'Your session for this board has ended. Sign in again to carry on.';
+    return 'The board isn\u2019t answering. Nothing can be sent until it is back.';
+  }
+
   /** A floor chip's link: the floor, or '' / null for all floors. */
   const floorHref = (floor) => `?${new URLSearchParams({ floor: floor ?? '' })}`;
 
@@ -5536,12 +5641,17 @@
    * payload when nothing says which floor: index.html's title stands.
    */
   const TITLE_TAIL = 'orchestratinator';
-  function windowTitle({ view, floor, floors }) {
+  function windowTitle({ view, floor, floors, board = null }) {
     const head = view === 'board' ? 'Board'
       : floor ? floor
         : floors?.length === 1 ? floors[0]
           : floors?.length ? 'All floors' : null;
-    return head ? `${head} · ${TITLE_TAIL}` : null;
+    // A window on a board the person was invited to says whose it is in
+    // place of the app's name (costmo, 2026-11-28: "the window needs a
+    // matching label"), the same words as its button in the row. The floor
+    // stays first, for the reason above.
+    const tail = typeof board === 'string' && board.trim() ? board.trim() : TITLE_TAIL;
+    return head ? `${head} · ${tail}` : null;
   }
 
   /**
@@ -5902,15 +6012,27 @@
    *              its known limit: an error turn names no message)
    */
   function meetingEntry(e, text, turns, delivery) {
-    if (!['line', 'queued'].includes(e.state)) return e;
     const words = meetSquash(text);
-    for (const t of [...(turns ?? [])].sort((a, b) => a.id - b.id)) {
+    // A command's receipt can come in two parts: /compact says "compacting"
+    // as it starts and "Compacted" when it ends (host/desk.js). The room
+    // keeps following the desk's receipt for it, or it read "compacting"
+    // two days on (costmo, 2026-11-27).
+    if (e.state === 'done') {
+      return delivery?.state === 'done' && delivery.said && delivery.said !== e.words && meetSquash(delivery.text).includes(words)
+        ? { ...e, words: delivery.said } : e;
+    }
+    if (!['line', 'queued'].includes(e.state)) return e;
+    const sorted = [...(turns ?? [])].sort((a, b) => a.id - b.id);
+    for (const t of sorted) {
       if (t.id <= (e.base ?? 0)) continue;
       if (t.role === 'user' && meetSquash(t.text).includes(words)) return { ...e, state: 'recorded', turn: t.id };
-      if (t.role === 'error') return { ...e, state: 'failed', words: t.text || 'the host could not deliver it' };
+      if (t.role === 'error') return { ...e, state: 'failed', words: t.text || 'the host could not deliver it', at: t.id };
     }
     if (delivery && meetSquash(delivery.text).includes(words)) {
-      if (delivery.state === 'done') return { ...e, state: 'done', words: delivery.said || 'done' };
+      // A command's receipt is no turn of the desk's, so `at` is where the
+      // desk's conversation stood when it came: the room's place for it
+      // (meetingItems), or it would stand last for ever.
+      if (delivery.state === 'done') return { ...e, state: 'done', words: delivery.said || 'done', at: Math.max(e.base ?? 0, sorted.at(-1)?.id ?? 0) };
       return { ...e, state: 'queued', note: delivery };
     }
     return e;
@@ -5942,8 +6064,12 @@
    * A message the room sent is one item, however many desks recorded it:
    * each recipient's user turn for it is folded into it (an entry's `turn`)
    * and never drawn again, so three desks do not show the operator's words
-   * three times. Its place is its first recorded turn; until one is
-   * recorded it stands at the end, the way the panel's pending bubbles do.
+   * three times. Its place is its first recorded turn. One that settled
+   * with no user turn on any desk (a command's receipt, `/compact`, `/btw`;
+   * a failure; a refusal) stands where it settled (each entry's `at`, else
+   * the turn it was sent after): it used to stand at the end for good, under
+   * everything said after it (costmo, 2026-11-27). Until it is recorded or
+   * settled it stands at the end, the way the panel's pending bubbles do.
    * A user turn the room did not send — typed into a window, a nudge struck
    * on the floor, a send whose record a reload lost — is folded with the
    * same words on other desks within `groupMs`, and drawn once.
@@ -5957,7 +6083,11 @@
     for (const s of sends ?? []) {
       const hits = s.entries.filter((e) => e.turn).map((e) => e.turn);
       for (const e of s.entries) if (e.turn) used.add(`${e.agent}|${e.turn}`);
-      items.push({ key: `send:${s.seq}`, kind: 'send', send: s, order: hits.length ? Math.min(...hits) : Infinity, tie: s.seq });
+      const settled = s.entries.length && s.entries.every((e) => ['done', 'failed', 'refused'].includes(e.state));
+      const order = hits.length ? Math.min(...hits)
+        : settled ? Math.min(...s.entries.map((e) => e.at ?? e.base ?? 0)) + 0.25
+          : Infinity;
+      items.push({ key: `send:${s.seq}`, kind: 'send', send: s, order, tie: s.seq });
     }
     const loose = [];
     for (const p of parts ?? []) {
@@ -6257,7 +6387,7 @@
    * in, so the tab pulses for it as for a question (costmo, 2026-11-19: the
    * pulse is for anything waiting on him).
    */
-  const deskAsking = (d) => !!d?.live && (/^permission_/.test(d.session?.awaiting_kind ?? '') || !!d.signin);
+  const deskAsking = (d) => !!d?.live && d.mine !== false && (/^permission_/.test(d.session?.awaiting_kind ?? '') || !!d.signin);
 
   /**
    * A desk a "nudge all" sends to, which is what a pending nudge is: something
@@ -7611,9 +7741,9 @@
         ${m.parts.map((p) => `<button type="button" class="chip m-to-one${to.includes(p.agent) ? ' on' : ''}" data-act="m-to" data-agent="${esc(p.agent)}" aria-pressed="${to.includes(p.agent)}" title="${esc(meetingToTitle(inRoomNow, m.to, p.agent, meetPersona(p.agent)))}" style="--m-c:${esc(meetColour(p.agent))};--m-h:${esc(meetHair(p.agent))}">${esc(meetPersona(p.agent))}</button>`).join('')}` : '';
     }
     const ta = $('p-text');
-    ta.placeholder = !to.length ? 'Choose who hears this…' : everyone ? 'Message everyone in the room… (start with @name for some)' : `Message ${to.map(meetPersona).join(', ')}…`;
+    ta.placeholder = ui.boardDown ? ui.boardDown : !to.length ? 'Choose who hears this…' : everyone ? 'Message everyone in the room… (start with @name for some)' : `Message ${to.map(meetPersona).join(', ')}…`;
     const named = meetingMentions(ta.value, m.parts.map((p) => ({ agent: p.agent, persona: meetPersona(p.agent) })));
-    wrap.querySelector('[data-act="send"]').disabled = !(named.to?.length || to.length) || m.phase !== 'live';
+    wrap.querySelector('[data-act="send"]').disabled = !(named.to?.length || to.length) || m.phase !== 'live' || !!ui.boardDown;
     // Files go to every desk the message does (costmo, 2026-11-17); a desk
     // whose host takes none is refused by the board, said under the message.
     gateAttach(m.phase === 'live');
@@ -8108,10 +8238,21 @@
     el.classList.remove('hidden');
   }
 
+  /** The line over the floor, a popout or a room while the board does not answer. */
+  function drawBoardDown() {
+    const el = $('board-down');
+    if (!el) return;
+    const text = ui.boardDown ?? '';
+    if (el.textContent !== text) el.textContent = text;
+    el.classList.toggle('hidden', !text);
+    document.body.classList.toggle('board-down', !!text);
+  }
+
   function render() {
     // Every draw is where what a window shows can change: a poll, a desk
     // going out or coming back, a room's desks, a floor picked.
     publishAttention();
+    drawBoardDown();
     // A meeting room is its desks' chat: no rooms either (issue #44).
     if (ui.meeting) {
       renderDetails();
@@ -8236,7 +8377,9 @@
     recordDeskScale();
     // Ages and counts in the open card tick with everything else.
     renderDetails();
-    const t = floor.totals ?? {};
+    // With several buildings the line is about the one shown, counted from
+    // its floors here; the payload's totals are the whole board's.
+    const t = (floor.buildings?.length ?? 0) > 1 ? buildingTotals(here, floor.queue) : (floor.totals ?? {});
     $('floor-totals').textContent =
       `${t.channels ?? 0} floor${t.channels === 1 ? '' : 's'} · ${t.desks ?? 0} desk${t.desks === 1 ? '' : 's'} · ${t.live ?? 0} here · ${t.awaiting ?? 0} need you`;
     renderPanel();
@@ -8258,7 +8401,7 @@
     if (next !== location.search) {
       try { history.replaceState(history.state, '', `${location.pathname}${next}${location.hash}`); } catch { /* the address is only for a reload */ }
     }
-    const title = windowTitle({ view, floor: ui.floorFilter, floors: ui.floorNames });
+    const title = windowTitle({ view, floor: ui.floorFilter, floors: ui.floorNames, board: window.orchBoards?.here?.()?.label ?? null });
     if (title && document.title !== title) document.title = title;
   }
 
@@ -8290,6 +8433,24 @@
       if (ui.on) render();
     },
   };
+
+  /** The totals line for one building's floors: the payload's own numbers, summed over them. */
+  function buildingTotals(here, queue) {
+    const names = new Set(here.map((c) => c.channel));
+    return {
+      channels: here.length,
+      desks: here.reduce((n, c) => n + c.desks.length, 0),
+      live: here.reduce((n, c) => n + c.live, 0),
+      awaiting: (queue ?? []).filter((q) => names.has(q.channel)).length,
+    };
+  }
+
+  // The building picker (app.js) puts a tab back on all floors when it
+  // changes building: a floor of the last building is not one of this one's.
+  window.floorSetFloor = (name) => { if (ui.floorTab) setFloor(name); };
+  // Who is looking, for the building picker (app.js) on a page that polls
+  // only the floor.
+  window.floorViewer = () => floor?.viewer ?? null;
 
   /** Ride to a floor, or back out to the building. */
   function setFloor(name) {
@@ -8324,8 +8485,9 @@
   async function pollOnce() {
     try {
       const r = await fetch('./api/floor', { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(POLL_TIMEOUT_MS) });
-      if (r.ok) { floor = await r.json(); floorRead = true; }
-    } catch { /* the board's own dot already reports the connection */ }
+      if (r.ok) { floor = await r.json(); floorRead = true; ui.boardDown = null; window.buildings?.note(floor.buildings); }
+      else ui.boardDown = boardDownWords(r.status, (await r.json().catch(() => null))?.error ?? null);
+    } catch { ui.boardDown = boardDownWords(0, null); }
     // Meetings kept with no window (0.14.4): boxed as if a room had them.
     if (ui.floorTab) keepHeld();
     // What happened to bulk nudges still in line, against the payload just read.

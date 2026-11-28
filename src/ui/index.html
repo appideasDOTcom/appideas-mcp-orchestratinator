@@ -26,6 +26,10 @@
         <button class="chip on" data-view="board" title="The board — channels, agents, tasks">board</button>
         <button class="chip" data-view="floor" title="The floor — one room per channel, one desk per agent">floor</button>
       </div>
+      <!-- The buildings (the service round, 2026-11-24): a chip each once
+           the board has two, and nothing before. Both views show the one
+           picked. Made and renamed in Settings. -->
+      <div class="chips" id="building-pick"></div>
       <span id="admin-state" class="admin-locked mono hidden"></span>
       <!-- Auto-refresh is a row in Settings (costmo, 2026-11-19); ↻ is an
            action and stays here. -->
@@ -37,6 +41,17 @@
       <button id="open-settings" class="btn" title="Settings — auto-refresh, how new floors open, updates, export and restore">⚙</button>
     </div>
   </header>
+
+  <!-- The board does not answer (its app quit, its computer offline, or a
+       session through the service ended): said here, over everything, and
+       nothing is sent until it is back (floor.js, boardDownWords). -->
+  <div id="board-down" class="board-down-bar hidden" role="status"></div>
+
+  <!-- The boards this operator was invited into, a button each, under the
+       header (costmo, 2026-11-27). The desktop app knows them and says them
+       through window.orchBoards; a browser never has any, so it never shows
+       (app.js, "guest boards"). -->
+  <div id="guest-boards" class="guest-boards" role="toolbar" aria-label="Boards you were invited to" hidden></div>
 
   <main>
     <!--

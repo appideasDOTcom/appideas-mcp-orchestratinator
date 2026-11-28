@@ -127,7 +127,7 @@ try {
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'intruder', version: '0.0.0' } } }),
     });
     await res.text();
-    assert(res.status === 401, `initialize with ${label} is rejected 401`);
+    assert(res.status === 503, `initialize with ${label} is rejected, 503 (not 401: see mcpGuard)`);
   }
   // ...and the rejection happens before a session exists, so a locked-out client
   // can't show up on the board.

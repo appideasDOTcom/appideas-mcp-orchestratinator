@@ -27,9 +27,9 @@
  *     as "keep nothing", and a file deleted before its message is read would
  *     be a message about nothing. A file sent again is kept from that send.
  */
-import { createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync } from 'node:fs';
+import { createReadStream, createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 
@@ -75,9 +75,13 @@ export function retentionDays(settingsPath = claudeSettings()) {
  * line, so a name with spaces in it is still one path, and nothing on a line
  * but the path after its dash.
  */
-export function withAttachments(text, paths) {
+export function withAttachments(text, paths, by = null) {
   if (!paths?.length) return text ?? '';
-  const list = [ATTACHED_HEADER, ...paths.map((p) => `- ${p}`)].join('\n');
+  // `by`: who attached them, when it was another agent's send_file
+  // (board.files), so the list reads "Attached by qa:" rather than claiming
+  // the operator did. The page reads either (splitAttached, src/ui/floor.js).
+  const who = typeof by === 'string' ? by.replace(/[\r\n:]/g, ' ').trim().slice(0, 80) : '';
+  const list = [who ? `Attached by ${who}:` : ATTACHED_HEADER, ...paths.map((p) => `- ${p}`)].join('\n');
   const words = String(text ?? '').trim();
   return words ? `${words}\n\n${list}` : list;
 }
@@ -140,6 +144,52 @@ export async function fetchUpload({ url, token, hostId, file, dir = uploadsDir()
   }
   renameSync(part, path);
   return path;
+}
+
+/** The most one send_file carries: the board's cap on a staged file. */
+export const SEND_MAX_BYTES = 100 * 1024 * 1024;
+
+/**
+ * Read a file on this machine for its own desk's send_file and stream it to
+ * the board (contract board.files). The path is the agent's: absolute, or
+ * relative to the desk's folder. Only a regular file this user can read, of
+ * at most SEND_MAX_BYTES; anything else is said to the board in words
+ * (POST /api/host/file/fail), which tells the agent that asked. Returns
+ * {ok} or {error}.
+ */
+export async function sendFile({ url, token, hostId, transfer, path, cwd, maxBytes = SEND_MAX_BYTES }) {
+  const headers = { 'x-orchestratinator-key': token ?? '' };
+  const fail = async (message) => {
+    try {
+      await fetch(`${url}/api/host/file/fail`, { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify({ host_id: hostId, transfer, message }), signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+    } catch { /* the board's own wait ends it as slow */ }
+    return { error: message };
+  };
+  const raw = String(path ?? '').trim();
+  if (!raw) return fail('no path was named');
+  const full = isAbsolute(raw) ? raw : resolve(cwd || homedir(), raw);
+  const name = basename(full);
+  let st;
+  try { st = statSync(full); } catch (err) { return fail(err.code === 'ENOENT' ? `${raw} does not exist on this computer` : `${raw} could not be read (${err.code ?? err.message})`); }
+  if (st.isDirectory()) return fail(`${raw} is a folder; send one file`);
+  if (!st.isFile()) return fail(`${raw} is not a regular file`);
+  if (st.size > maxBytes) return fail(`${name} is ${Math.round(st.size / 1048576)} MB, more than the ${Math.round(maxBytes / 1048576)} MB one send carries`);
+  try {
+    const res = await fetch(`${url}/api/host/file?host_id=${encodeURIComponent(hostId)}&transfer=${encodeURIComponent(transfer)}&name=${encodeURIComponent(name)}`, {
+      method: 'POST',
+      headers: { ...headers, 'content-type': 'application/octet-stream', 'content-length': String(st.size) },
+      body: Readable.toWeb(createReadStream(full)),
+      duplex: 'half',
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+    if (!res.ok) {
+      const why = await res.json().then((b) => b?.error).catch(() => null);
+      return { error: `the board would not take ${name}: ${why ?? res.status}` };
+    }
+    return { ok: true, name, size: st.size };
+  } catch (err) {
+    return { error: `could not send ${name} to the board (${err.cause?.code ?? err.code ?? err.name ?? err.message})` };
+  }
 }
 
 /**

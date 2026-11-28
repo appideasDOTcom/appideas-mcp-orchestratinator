@@ -9,9 +9,11 @@ import { openDb, makeStore } from './db.js';
 import { registerTools } from './tools.js';
 import { createWebRouter } from './web.js';
 import { createAuth } from './auth.js';
+import { createRelay, createScope } from './relay.js';
 import { buildCommit } from './build-info.js';
 import { createUpdates } from './updates.js';
 import { createUploads } from './uploads.js';
+import { createFiles } from './files.js';
 import { HOST_STALE_SECONDS } from './floor.js';
 
 // Pick up ./.env for bare `npm start` runs. Under Docker the values arrive
@@ -50,6 +52,10 @@ const STARTED_AT = new Date().toISOString();
 const db = openDb(DB_PATH);
 const store = makeStore(db);
 const auth = createAuth();
+// A request relayed through the desktop app's tunnel says who it is from,
+// signed (contract board.relay; src/relay.js). Made at start so a short
+// secret fails the start instead of serving relayed requests unchecked.
+const relay = createRelay();
 
 const app = express();
 
@@ -99,6 +105,9 @@ app.use((req, res, next) => {
 app.set('trust proxy', process.env.TRUST_PROXY ?? 'loopback');
 // Ahead of the body parser: an unauthorized caller shouldn't get 4mb of parsing
 // done on its behalf. /health stays open — the container healthcheck uses it.
+// Ahead of everything that reads a request: a relayed one is verified or
+// refused here, and every route after it can ask who it is from.
+app.use(relay.middleware);
 app.use('/mcp', auth.mcpGuard);
 // A restored backup is one JSON document holding an entire board, so it needs
 // headroom no other route should get. Chosen per-path rather than by raising the
@@ -109,15 +118,22 @@ const jsonRestore = express.json({ limit: process.env.RESTORE_BODY_LIMIT ?? '128
 // route after adminGuard has run, so no parser may touch it: a .json file sent
 // as application/json would otherwise be parsed here, against the 4mb limit.
 const UPLOAD_PATH = '/api/floor/upload';
+// And a file an agent sends (board.files): its bytes, from the sender's host.
+const HOST_FILE_PATH = '/api/host/file';
+// The broker between the send_file tool and the floor's routes (src/files.js).
+const files = createFiles();
 // The routes that take a whole backup file: a restore, one floor of it, and
 // the read of which floors it holds (the page posts the file to ask). A real
 // board's file is 14 MB (2026-11-19), so each needs the restore's headroom;
 // the one-floor routes were refused at 4mb by the first real file.
 const RESTORE_PATHS = new Set(['/api/admin/backup/restore', '/api/admin/backup/restore-floor', '/api/admin/backup/floors']);
 app.use((req, res, next) => {
-  if (req.path === UPLOAD_PATH) return next();
+  if (req.path === UPLOAD_PATH || req.path === HOST_FILE_PATH) return next();
   return (RESTORE_PATHS.has(req.path) ? jsonRestore : jsonBody)(req, res, next);
 });
+// Who may do what, now that a body names its floor and desk (board.relay
+// v4): a guest's buildings, and a desk's own operator's actions.
+app.use(createScope({ store }));
 
 // One transport per MCP session (keyed by the mcp-session-id header).
 const transports = Object.create(null);
@@ -371,7 +387,7 @@ app.post('/mcp', async (req, res) => {
     };
 
     const server = new McpServer({ name: NAME, version: VERSION });
-    registerTools(server, { store, context });
+    registerTools(server, { store, context, files });
     await server.connect(transport);
   }
 
@@ -436,6 +452,7 @@ app.use(createWebRouter({
   sessions,
   updates,
   uploads,
+  files,
   sessionStats,
   auth,
   closeSessionsFor,
@@ -456,4 +473,5 @@ app.listen(PORT, HOST, () => {
   console.log(`[orchestratinator] MCP       http://localhost:${PORT}/mcp`);
   console.log(`[orchestratinator] dashboard http://localhost:${PORT}/   (db: ${DB_PATH})`);
   console.log(`[orchestratinator] ${auth.describeStartup()}`);
+  console.log(`[orchestratinator] ${relay.describe()}`);
 });

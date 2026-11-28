@@ -1,280 +1,90 @@
 # APP(ideas) MCP Orchestratinator
 
-**Human-Agent Teams, with the human in the middle.**
+**Run a team of Claude Code agents from one window, and remain the one who decides.**
 
-Introducing **Human-Agent Teams — HATs**. A HAT is a team of specialized,
-well-trained, focused AI agents, orchestrated, monitored, and controlled by the
-ever-important human in the middle. The APP(ideas) MCP Orchestratinator gives
-that human a friendly, manageable space to run the work.
+In nerd terms, the Orchestratinator is an Agentic Development Environment, complete with built-in MCP. For everyone else, it's a way to get your agents to work together and get stuff done.
 
-## What it is
+· **[Download for macOS](https://appideas-mcp-orchestratinator-release.sfo3.cdn.digitaloceanspaces.com/desktop-app/darwin/arm64/Orchestratinator-arm64.dmg)** (Apple silicon)
 
-The Orchestratinator is a complete **Agentic Development Environment (ADE)**:
-one web page, served by a small self-hosted server, from which you start,
-watch, talk to and steer every AI coding agent on every project you run.
-Nothing about your editor or your agents changes, and any conversation goes
-back to Claude Code or VS Code whenever you want it there.
+· **[Download for Windows](https://appideas-mcp-orchestratinator-release.sfo3.cdn.digitaloceanspaces.com/desktop-app/win32/x64/Orchestratinator-Setup.exe)**
 
-**Installing it is one sentence to an agent** ([Install](#install)). After
-that, running the team happens on the page:
+Free to download and use · the Orchestratinator itself is open source (GPL-3.0)
 
-- **See the whole company at a glance.** Every project is a floor, and every
-  agent at work has a desk. The header counts who's here and who needs you.
-- **Answer from one screen.** A permission prompt is **Approve / Deny** on the
-  desk; a question is a form. No hunting for the terminal that's waiting.
-- **Seat an agent without editing a file.** **Take a desk**: choose a folder,
-  name the floor and the seat, and its Claude Code starts there, already
-  on the board.
-- **Keep several chats open at once.** **⧉** pops any desk's chat into a
-  window of its own, live, doing everything the floor's panel does.
-- **Talk to several agents in one conversation.** Check the desks, press
-  **Meeting room**, and one chat holds them all; `@names` narrows a message
-  to some of them.
-- **Put one agent in several places at once.** **New desk here** seats an
-  agent on another floor with a session of its own while the one it has
-  carries on, and an agent already in a meeting room can join a second:
-  each is its own conversation, in the same folder.
-- **Hand out work without typing.** The service bell tells an agent "you've
-  got work"; **select desks** rings a whole room's at once.
-- **Drive each session from its desk.** Slash commands, model, effort and Stop,
-  from the desk's own composer.
-- **Stay current in one click.** When a new build lands, **Update** in the
-  header rebuilds the server, updates the plugin and restarts the host (on
-  macOS, for now).
+![The Orchestratinator app: a floor of agents at their desks, one desk asking permission, Approve and Deny in its open conversation](docs/images/hero.png)
 
-![The building — one floor per project](docs/images/building.png)
+Put teams of agents to work for you, organized how you want and ready to get
+the work done the way you want it done. Each project gets a floor and each
+agent a desk, all in one window. You see what every agent is doing, and you
+step in when one needs you.
 
-**The building.** Each floor is a project, each desk an agent. Here the
-TrailTracker mobile app is in a launch push with six agents seated and one
-needing an answer; the Bookinator WordPress-plugin team is running quietly;
-Ledgerino, between releases, is dark. Agents can hold desks on more than one
-floor — this Project Manager is driving the TrailTracker launch while
-standing by on Bookinator.
+We call that a **Human-Agent Team (HAT)**: agents doing the work, and a person
+in the middle making the calls.
 
-![A room — every agent at its desk](docs/images/room.png)
+## What you get
 
-**A room per project.** Walk into a floor and every agent on that project sits
-at a desk: thought bubbles show what each just said, desk signs show what
-they're doing, and a red badge marks the one that needs you. Here the QA
-Engineer's service bell is mid-ring for the task waiting in its tray. The
-panel on the right is that desk's live conversation — read it, type into it,
-and answer the permission prompt with a click.
+- **See who needs you at a glance.** A red badge marks the agent waiting on
+  you, and the header counts them.
+- **Answer it where you are.** A permission prompt is **Approve / Deny** on
+  the desk, and a question is a form.
+- **Talk to several agents in one conversation.** Check their desks and press
+  **Meeting room**. Type `@name` to speak to just one of them.
+- **Put one agent in two places.** Seat it in a second meeting, or on another
+  project with **New desk here**. Each place gets its own conversation.
+- **Stop carrying messages between agents.** They share a mailbox and a task
+  list. Ring a desk's **service bell** to say "you've got work".
+- **A complete ADE.** The Orchestratinator is a full-featured Agentic
+  Development Environment. Let your agents do the work while you set the
+  direction and make the decisions.
+- **Not just for code.** Any kind of agent works here: writing, research,
+  design, marketing, operations. Different kinds of agents work together as
+  one team; our own marketing and design agents share a floor with our
+  developers.
+- **Your code editor, if you want it.** Sessions you start in Claude Code or
+  VS Code show up on the floor, and **Open in VS Code** hands any conversation
+  back.
 
-![A meeting room — three agents, one conversation](docs/images/meeting-room.png)
+## Get started
 
-**A meeting room.** Several desks from one floor in one window: who's in the
-room and what each is doing along the top, one transcript with each agent's
-words in its own colour, and one composer. A message goes to everyone unless
-you name some of them, and each desk's delivery shows under it. While the room
-is open, what its agents broadcast to each other stays in the room.
+1. **Download the app and open it.** Everything it needs is inside. If Claude
+   Code isn't installed, the app installs it.
+2. **Sign in to Claude.** One button.
+3. **Take a desk.** Choose a project folder and give the agent a name. Repeat
+   for each agent on the team.
 
-![Chats in windows of their own, beside the floor](docs/images/popouts.png)
+Nothing else to install or configure, and the app keeps itself up to date.
 
-**Chats of their own.** Pop a desk's chat out with **⧉** and put it beside the
-floor; pop out a few more and each stays live. **Re-attach** brings it back,
-with whatever you'd typed.
+You need a Claude account that can use Claude Code. The Windows installer
+isn't code-signed, so Windows asks you to confirm the first time. No Linux
+app yet.
 
-![The board — the same server, denser](docs/images/board.png)
+On a Mac, if you prefer Homebrew (alternative to the app download above):
+`brew install --cask appideasDOTcom/tap/orchestratinator`.
 
-**The board.** The same building in a more compact (and more technical)
-format: presence, self-reported status with its age, unread and task counts,
-and the full activity log — every message, task, and contract change, newest
-first. Operator controls live here too: mark mail read, close or reassign
-tasks, archive channels — and archiving is on the floor as well, so a channel
-put away from either view is a pill at the bottom of both until it is
-restored.
+## A tour
 
-Under the page sit three small parts: an MCP coordination server (Docker) that
-gives agents on a project a shared mailbox, task list and agreed contracts; a
-plugin for Claude Code or Visual Studio Code — either one, or both — that lets
-each session report what it's doing; and a host service that runs each
-desk's Claude Code for you, so the floor can talk to it. Agents keep their own repos and their own
-boundaries — nothing merges, nothing is shared but the board. Those are the
-three things the next section installs.
+![The building: one floor per project](docs/images/building.png)
 
-## Install
+**Every project, one view.** TrailTracker is mid-launch with one agent
+waiting on an answer, Bookinator is working through a release, and Ledgerino
+is quiet.
 
-**The easiest path: have an AI agent do it.** This is a several-part
-installation — a server, a plugin, a host — so clone the repo, open a session
-in it from Claude Code or VS Code, and say *"install the orchestratinator by
-following the README."* Everything below is the manual path, and exactly what
-the agent will follow.
+![A floor with three agents in an In a meeting box, beside that meeting's own window](docs/images/meeting-room.png)
 
-Everything here is done once per machine. You need **Docker**,
-**Node 24**, and **Claude Code** (the `claude` command) installed and signed
-in — the host runs desks with it even if you only ever work from VS Code.
-Where you *work* is your choice: start sessions from Claude Code in a
-terminal, from VS Code, or both. The floor doesn't replace either — it hands
-any conversation back to them whenever you want a feature its chat doesn't
-provide. The host — the part that runs each desk's Claude Code for the floor —
-runs on **macOS** and **Windows**; the server and the board run anywhere Docker does,
-and the plugin wherever Claude Code has a POSIX shell. A desk with no host
-behind it is still on the floor with its presence, status, prompts and the
-conversation as the plugin's hooks report it, but it is read there, not typed
-into.
+**A meeting.** On the floor, the agents in a meeting stand together. The
+meeting itself is a window of its own: one conversation, each agent's
+answers in its own colour.
 
-**1. Get the code and make a shared secret.**
+![One agent in two meetings at once](docs/images/two-places.png)
 
-```bash
-git clone git@github.com:appideasDOTcom/appideas-mcp-orchestratinator.git
-cd appideas-mcp-orchestratinator
-node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))"
-```
+**One agent, two meetings.** The QA Engineer is in both, with a separate
+conversation in each.
 
-Put the generated value in `.env` at the root of this repo:
+## Bring an agent up to speed
 
-```ini
-ORCH_AUTH_TOKEN=<the generated value>
-ORCH_AUTH_MODE=enforce
-```
-
-**2. Start the server.**
-
-```bash
-docker compose up -d
-curl -s localhost:8787/health          # {"ok":true,...}
-```
-
-Data lives in a Docker volume and survives rebuilds. The port is published on
-**every interface** so other machines on your network can use the board — right
-for a trusted LAN, wrong for anything else. To make it this-machine-only,
-change the port line in `docker-compose.yml` to `"127.0.0.1:8787:8787"`, and
-read [the security model](docs/security.md) before publishing it any wider.
-
-**3. Make each repo a desk.**
-
-A repo joins a floor by declaring itself in its own `.mcp.json` — no central
-list, no shared parent folder:
-
-```jsonc
-{
-  "mcpServers": {
-    "orchestratinator": {
-      "type": "http",
-      "url": "http://localhost:8787/mcp",
-      "headers": {
-        "X-Channel": "your-project",
-        "X-Agent": "this-repo's-role",
-        "X-Orchestratinator-Key": "<the ORCH_AUTH_TOKEN from .env>"
-      }
-    }
-  }
-}
-```
-
-Repos sharing an `X-Channel` share a floor, a mailbox, and a task board. The
-`X-Agent` is that repo's seat on it. A directory without a binding is invisible
-to the whole system.
-
-**Or skip the file.** Once the host is installed (step 5), **Take a desk** on
-the floor does this for you: pick the folder, name the floor and the seat, and
-the host binds it in Claude Code's own configuration and starts it there.
-No approval dialog, and the key never leaves that machine. A folder that
-already has a `.mcp.json` entry is imported the same way. A folder bound to
-another instance of the orchestratinator, at another address, is released
-from it and seated here on the same click: the dialog names the address it
-is leaving before you press. Its conversations come with it; its messages
-and tasks stay on the instance it left.
-
-**4. Install the plugin** — this is what puts each session on the floor.
-
-One install covers the whole machine: Claude Code and VS Code share it, so do
-this from whichever you work in.
-
-**From Claude Code** (a terminal session), from the clone:
-
-```
-/plugin marketplace add ./
-/plugin install orchestratinator-floor
-```
-
-From any other directory, give the full path to the clone instead of `./`.
-Write it with the slash: on Windows a bare `.` is refused ("Invalid
-marketplace source format. Try: owner/repo, https://..., or ./path").
-
-**From VS Code**, the `/plugin` command doesn't take arguments — it answers
-*"/plugin isn't available in this environment."* Type `/plugin` on its own and
-use the menu: add the marketplace by directory, then install
-**orchestratinator-floor** from it (it sits at the bottom of the list, below
-the official plugins).
-
-There is nothing to configure: the plugin reads each repo's own binding — its
-`.mcp.json`, or the local-scope entry `claude mcp add -s local` writes — and
-reports state to the same server with the same secret. A repo that doesn't name
-the orchestratinator never appears on any floor.
-
-**Updating it later.** The marketplace is the clone itself, but what runs is a
-cached copy that does not follow the working tree. After pulling a new
-version:
-
-```
-claude plugin update orchestratinator-floor
-```
-
-(or the same from the `/plugin` menu). Check with `claude plugin list`; the
-number should match the one `/health` reports.
-
-**5. Install the host** — this is what lets the floor run and talk to desks.
-
-```bash
-./host/install.sh ~/path/to/your/projects
-```
-
-Name the directory your repos live under. It finds every desk beneath it,
-registers a LaunchAgent so it starts at login, and reads the server address and
-shared secret from those desks. If your desks point at more than one board, the
-host refuses to guess — name one with
-`./host/install.sh --url http://localhost:8787 ~/path/to/your/projects`.
-
-On **Windows**, from PowerShell in the clone:
-`powershell -ExecutionPolicy Bypass -File host\install.ps1 C:\path\to\your\projects`.
-It registers a task that starts the host at logon (Task Scheduler stands in
-for launchd), takes `-Url` and `-Token` like `install.sh`'s `--url` and
-`--token`, and `-Uninstall` removes it. One known limit there: when a desk
-stops, a command it ran through Git Bash that has detached itself (a dev
-server or a watcher started with `exec`) is not stopped with it.
-
-A machine with no hand-bound repo has nothing to read the shared secret from,
-and the host needs one to talk to the board and to bind desks from the floor.
-Give it the value from `.env` with
-`./host/install.sh --token <ORCH_AUTH_TOKEN> ~/path/to/your/projects`. A repo's
-own binding wins over it, so a machine with even one `.mcp.json` that writes
-the key out needs no `--token`.
-
-A `.mcp.json` that keeps the key out of the tree as `"${ORCH_AUTH_TOKEN}"` is
-filled in by Claude Code from your shell, but the host runs as a LaunchAgent,
-which starts with none of your exported variables. So `install.sh` takes the
-key from the shell you run it in: with `ORCH_AUTH_TOKEN` exported there, no
-`--token` is needed, and it is written to the host's own config. Each Claude
-Code the host starts for such a repo is given the variable too. Without either, the
-host's log says at startup which desk it could not read a key from.
-
-**6. Open the floor.**
-
-Open <http://localhost:8787/> in a browser. The board/floor switch is top
-right; every desk you wired up should be there.
-
-## Onboarding an agent
-
-A desk on the floor is a wired-up repo. It is not yet an agent that knows how to
-work with anyone else on the board — that part is one document and one prompt.
-
-The document is
-[`docs/multi-agent-team-playbook.md`](docs/multi-agent-team-playbook.md), the
-playbook APPideas' own agents are onboarded with, kept here as a worked example
-rather than a template. It covers what the tools are actually for, the
-difference between addressing a message and delivering one, when an agent
-should act alone and when it should stop and ask, how two agents renegotiate a
-contract between themselves, what the operator can see on the floor, and the
-trigger words that mean something specific. **Read it once yourself before you
-hand it on.** The mechanics in it are this server's and will be the same for
-you; the conventions are ours — our product names, our free/pro pairing, our
-rule that git belongs to the operator alone — and those are the parts to
-change.
-
-**Then point the agent at it, in its own repo.** Copy the file into that repo
-first: a path an agent can open beats a link it has to go and fetch. In that
-repo's first session:
+A new agent knows its own repo, not how to work with the rest of the team.
+Give it [`docs/multi-agent-team-playbook.md`](docs/multi-agent-team-playbook.md),
+the playbook our own agents use (change our conventions to yours), and say in
+its first session:
 
 > Read `docs/multi-agent-team-playbook.md`. It describes how this company's
 > agents work together over the orchestratinator MCP server, and it applies to
@@ -284,146 +94,25 @@ repo's first session:
 > start. You can hold any questions you might have. We'll work through your
 > concerns as they come up in the work.
 
-The last two sentences do more work than they look like they do, and they are
-two separate things.
+## Run it from source
 
-**Coming back before starting is a gate, and it is worth keeping.** It costs
-one exchange and buys you the chance to add the detail this particular agent
-needs, and the agent the chance to raise something before it is committed to an
-approach.
+To read or change the code, or to run the board on a server of your own:
+clone this repo, open Claude Code in it, and say *"install the
+orchestratinator by following docs/run-from-source.md."* The steps are
+there if you'd rather do it by hand.
 
-**Holding questions is not brushing them off.** Roughly four in five of the
-questions an agent has at the start get answered by doing the work —
-organically, at the moment they matter, at no cost to anyone. The fifth is the
-real one, and it arrives later carrying the context that makes it cheap to
-answer and hard to misread. Answering all of them up front inverts that: it
-spends the most time on the questions with the least information behind them.
-The playbook makes the same point in its own voice under **After reading this,
-hold your questions**, with the list of the ones that get asked every single
-time and need not be.
+## More
 
-**How to tell it took.** The agent should come back having run `whoami` and
-`poll_messages` rather than asking you what it is called, and should set a
-status, so its sign stops reading `idle`. Once it is working, it addresses
-messages to a name instead of broadcasting at the room. If none of that
-changed, it read the playbook as background rather than as instructions — say
-so plainly and it will correct.
-
-## Day to day
-
-One rule underneath everything: a conversation is one `claude` process, so
-**one app holds it at a time**. The floor always says who holds each desk. The
-daily loop:
-
-**1. Open a project** in VS Code or Claude Code — any repo that is a desk
-(step 3 above).
-
-**2. Start a session and work as you always have.** The desk comes alive on
-its floor: your conversation, state, and prompts appear as they happen. The
-first session in a new repo stops on *"New MCP server found in this project"*
-— approve it once and that repo is settled for good.
-
-**3. Open the floor** — <http://localhost:8787/>. Glance at the building; the
-header counts who's here and who needs you. Go where it points.
-
-**4. Click into a room, then a desk,** to read that agent's conversation live.
-
-**5. Answer what needs you.** If the floor holds the desk, permission prompts
-have **Approve / Deny** buttons right on it. If your editor holds it, the
-floor shows the prompt and says *"answer this in your editor"* — answer it
-there.
-
-**6. Ring the service bell** on any desk whose tray shows waiting messages or
-tasks. The agent picks them up. A desk whose Claude Code is not running shows
-its bell half-lit: ringing it starts it first — the conversation resumes where
-it left off — and then nudges. To nudge several at once, or mark their messages
-read, or hide them, use **select desks** on the room's header, check the desks,
-and pick the action.
-
-**7. Type to a desk from the floor** by first closing that conversation's tab
-in your editor and clicking **Open on the Floor** — one app at a time. The composer
-comes alive a second or two later; if the desk's Claude Code is not running,
-the host starts it and *resumes the same conversation*, history intact.
-
-The composer takes a slash command too: `/clear`, `/compact`, `/btw <question>`
-and anything else Claude Code knows, each confirmed by Claude Code's own
-receipt and said in its own terms — a new conversation started, compacting,
-answered on the side (with the answer). The model and effort controls on
-the panel's foot are Claude Code's own `/model` and `/effort`, so a choice is
-also **saved as the default for new sessions** on that desk's machine, the
-way it is when you change it in Claude Code or your editor. While a
-desk compacts, the floor says so, and a message sent meanwhile is taken and
-answered when the compaction ends.
-
-**8. Pop a chat out, or bring several desks into one.** **⧉** on a desk's
-panel detaches its chat into a window of its own; open as many as you like
-beside the floor. To talk to several agents together, **select desks**, check
-them, and press **Meeting room**. An agent that is already in a room can be
-checked for another, and gets a second session there; **Take a desk → New
-desk here** does the same across floors. All of it is in
-[Operating the board](docs/operating.md#chatting-with-a-desk).
-
-**9. Take a conversation back whenever you want** — for any feature the floor
-chat doesn't provide. **Open in VS Code** moves it to your editor with everything
-you did from the floor already in it; **Open in Claude** opens a terminal of your
-own `claude` on the same conversation. Either one takes the conversation from
-the floor, and the floor's next message takes it back.
-
-**10. Keep it current.** The header shows **Update available** when the
-branch the board follows has a commit this build lacks; it checks GitHub once
-a day. **Update** says what it will interrupt, then the host on the board's
-machine fetches the commit, rebuilds the server, updates the plugin when its
-hooks changed, and restarts itself, and the page reloads onto the new build.
-An update is refused, in words, when the clone has local changes or is not on
-the followed branch. One that stops after the server was rebuilt (the plugin
-update failed, say) leaves **Update stopped** in the header, and **Finish the
-update** runs what is left. **Settings** (⚙) turns the daily check off, switches to
-the development version (`develop` instead of `main`), and has **Check now**.
-The page's Update restarts a host that launchd runs (macOS). On Windows,
-pull the clone and run `host\install.ps1` again, which stops the running
-host cleanly and starts the new one.
-
-## Useful commands
-
-```bash
-docker compose up -d                       # start (add --build after code changes)
-docker compose down                        # stop; data kept in the volume
-docker compose logs -f orchestratinator    # tail
-curl -s localhost:8787/health              # is it up?
-open http://localhost:8787/                # the page (board/floor switch top right)
-npm test                                   # every suite
-```
-
-And in any agent's chat window:
-
-```
-whoami                       # confirm channel/agent wiring
-list_tasks status=open       # what's pending for me
-get_contract                 # read the whole agreed interface
-```
-
-## Going deeper
-
-The front page stops here; the details — all of them — moved to `docs/`:
-
-| Page | What's in it |
-| --- | --- |
-| [Operating the board](docs/operating.md) | Presence and status chips, the floor in detail, chats in their own windows, meeting rooms, avatars, saved prompts, stopping a turn, operator actions (view/mark read, close/reassign, move, hide, retire, archive — from either view) |
-| [The team playbook](docs/multi-agent-team-playbook.md) | The document you hand a new agent: tools, addressing, autonomy, contracts, what the operator sees on the floor, trigger words — APPideas' own, as an example to modify |
-| [How agents coordinate](docs/coordination.md) | Channels, the ten MCP tools, contracts, a typical exchange, wiring up a team, and why human→agent and agent→agent are different mechanisms |
-| [The security model](docs/security.md) | The shared secret, the network boundary, what the floor puts on the server, and the sign-in that used to exist |
-| [Backups & migration](docs/backup-and-migration.md) | Export, restore, moving the board to a permanent host, cron-driven backups |
-| [Internals & development](docs/internals.md) | How it works, the schema, running without Docker, bumping the version, environment variables |
+[Day to day](docs/day-to-day.md) ·
+[Using the floor](docs/operating.md) ·
+[Onboarding an agent](docs/onboarding.md) ·
+[The team playbook](docs/multi-agent-team-playbook.md) ·
+[How agents work together](docs/coordination.md) ·
+[Security](docs/security.md) ·
+[Backups](docs/backup-and-migration.md) ·
+[Run from source](docs/run-from-source.md) ·
+[Internals](docs/internals.md)
 
 ## License
 
-Copyright (C) 2026 AppIdeas.com
-
-This program is free software: you can redistribute it and/or modify it under
-the terms of the GNU General Public License as published by the Free Software
-Foundation, version 3.
-
-This program is distributed in the hope that it will be useful, but WITHOUT ANY
-WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
-PARTICULAR PURPOSE. See the GNU General Public License in [LICENSE](LICENSE)
-for details, or <https://www.gnu.org/licenses/gpl-3.0.html>.
+GPL-3.0. Copyright (C) 2026 AppIdeas.com. See [LICENSE](LICENSE).

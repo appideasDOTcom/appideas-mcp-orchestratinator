@@ -2,7 +2,10 @@ import './node-floor.js';
 import Database from 'better-sqlite3';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { randomBytes } from 'node:crypto';
 import { shirtForSeat } from './palette.js';
+import { SERVER_CHANNEL } from './auth.js';
+import { relayedBy } from './relay.js';
 
 /**
  * Open (and migrate) the SQLite database.
@@ -76,6 +79,40 @@ export function openDb(path) {
       channel     TEXT PRIMARY KEY,
       archived_at TEXT,
       archived_by TEXT
+    );
+
+    -- Buildings (the service round, costmo 2026-11-24): a board holds many,
+    -- and every floor belongs to one. A bucket of floors and no more: a floor
+    -- (a channel) is still named once per board, and nothing an agent does
+    -- reads which building it is in. The id is opaque and stable across
+    -- renames (b_ + 10 base32), because the desktop app registers it with
+    -- the service, which never needs a floor's name. Exactly one row is the
+    -- default (ensureDefaultBuilding), and a floor with no building of its
+    -- own (channel_flags.building_id NULL, or naming a building that is not
+    -- here, as after a one-floor restore from another board) is in it, so
+    -- every board from before this is unchanged: one building, every floor.
+    CREATE TABLE IF NOT EXISTS buildings (
+      id          TEXT PRIMARY KEY,
+      name        TEXT NOT NULL,
+      is_default  INTEGER NOT NULL DEFAULT 0,
+      created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_buildings_name ON buildings(name COLLATE NOCASE);
+
+    -- Whose a guest's desk is, kept beyond its host row (board.relay v6,
+    -- desktop-dev's revoke re-walk): a guest's desk can outlive its host's
+    -- record (the window died, the host went), and a revoke must still find
+    -- it to end it. Written when a guest's host files a desk or a guest's
+    -- agent connects as a new name; read by deskOperator when no host runs
+    -- the desk. The owner's desks have no row. Not in BACKUP_TABLES: it names
+    -- operators of a service session, not the team's work.
+    CREATE TABLE IF NOT EXISTS desk_operators (
+      channel    TEXT NOT NULL,
+      agent      TEXT NOT NULL,
+      operator   TEXT NOT NULL,
+      name       TEXT,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (channel, agent)
     );
 
     -- The same flag one level down (issue #20): a desk the operator has put
@@ -421,6 +458,16 @@ export function openDb(path) {
   // shipped to the live instance without it.
   addColumn(db, 'desk_twins', 'start_cursor', 'INTEGER NOT NULL DEFAULT 0');
 
+  // Where a guest's desk starts reading: the floor's newest message when the
+  // name was first that operator's. A name is the board's whole idea of who
+  // an agent is, and a guest's desk can take a name an earlier guest's desk
+  // left (a revoke frees it). Read from 0, the new desk was handed the old
+  // one's mail and a meeting room's contained broadcasts, which name their
+  // audience by agent (desktop-dev's M3 walk, 2026-11-25: a new partner's
+  // partner-agent read a room message from an earlier walk's). The owner's
+  // desks have no row and read as they always have.
+  addColumn(db, 'desk_operators', 'start_cursor', 'INTEGER NOT NULL DEFAULT 0');
+
   // Retired = the operator has taken this agent off the board. Deliberately a
   // flag and not a DELETE: the row is recreated by `touchAgent` the moment the
   // agent connects again, so a delete would be undone by the next reconnect and
@@ -530,6 +577,30 @@ export function openDb(path) {
   // leave takes the entry out of.
   addColumn(db, 'hosted_desks', 'scope', 'TEXT');
 
+  // Which building a floor is in. On channel_flags because that is already
+  // the row an operator's statement about a floor lives on: it is backed up,
+  // restored one floor at a time, and swept by purgeChannel with the floor.
+  addColumn(db, 'channel_flags', 'building_id', 'TEXT');
+  // Whose a host is (board.relay v4, M2): NULL for a host registered at the
+  // board's own machine, which is the owner's; the service's operator id for
+  // one registered through the relay as a guest. A desk belongs to its host's
+  // operator, and only that operator answers its prompts or moves it.
+  addColumn(db, 'hosts', 'operator', 'TEXT');
+  // It reads and sends a file for its own desk's send_file (board.files). Said
+  // at every registration; a host from before says nothing and is not asked.
+  addColumn(db, 'hosts', 'files', 'INTEGER NOT NULL DEFAULT 0');
+  addColumn(db, 'hosts', 'operator_name', 'TEXT');
+  ensureDefaultBuilding(db);
+  // The default was "Main" for the first day (4bdd410), and costmo named it
+  // Headquarters the next morning. A board that still has the old default
+  // name takes the new one, once: the settings row records that it was done,
+  // so an operator who names a building "Main" afterwards keeps it.
+  if (!db.prepare("SELECT 1 FROM settings WHERE key = 'migration.headquarters'").get()) {
+    const renamed = db.prepare("UPDATE buildings SET name = ? WHERE is_default = 1 AND name = 'Main' AND NOT EXISTS (SELECT 1 FROM buildings WHERE name = ? COLLATE NOCASE)")
+      .run(DEFAULT_BUILDING_NAME, DEFAULT_BUILDING_NAME).changes;
+    db.prepare("INSERT INTO settings (key, value) VALUES ('migration.headquarters', ?)").run(renamed ? 'renamed' : 'kept');
+  }
+
   migratePersonas(db);
   migrateAgentNames(db);
   addColumn(db, 'agent_profile', 'shirt', 'TEXT');
@@ -637,6 +708,42 @@ function migrateAgentNames(db) {
   ).run().changes;
   db.exec(`DROP TABLE agent_names`);
   console.log(`[db] agent_names -> agent_profile (${moved} name${moved === 1 ? '' : 's'} carried over)`);
+}
+
+/** The default building's name on a board that has never had one (costmo, 2026-11-25). */
+export const DEFAULT_BUILDING_NAME = 'Headquarters';
+
+/** An opaque building id: b_ and ten base32 characters (50 bits). */
+export function newBuildingId() {
+  const alphabet = 'abcdefghijklmnopqrstuvwxyz234567';
+  const bytes = randomBytes(10);
+  let id = 'b_';
+  for (const b of bytes) id += alphabet[b & 31];
+  return id;
+}
+
+/**
+ * Exactly one default building, made on a board that has none: at first
+ * open (every board from before buildings), and after a restore from a
+ * file written before them, which leaves this table untouched or empties
+ * it. Two defaults (a restore of a hand-edited file) keep the oldest.
+ */
+export function ensureDefaultBuilding(db) {
+  const defaults = db.prepare('SELECT id FROM buildings WHERE is_default = 1 ORDER BY created_at, id').all();
+  if (defaults.length === 1) return defaults[0].id;
+  if (defaults.length > 1) {
+    db.prepare('UPDATE buildings SET is_default = 0 WHERE is_default = 1 AND id != ?').run(defaults[0].id);
+    return defaults[0].id;
+  }
+  // A board whose buildings all lost the mark keeps its oldest as the default.
+  const oldest = db.prepare('SELECT id FROM buildings ORDER BY created_at, id LIMIT 1').get();
+  if (oldest) {
+    db.prepare('UPDATE buildings SET is_default = 1 WHERE id = ?').run(oldest.id);
+    return oldest.id;
+  }
+  const id = newBuildingId();
+  db.prepare('INSERT INTO buildings (id, name, is_default) VALUES (?, ?, 1)').run(id, DEFAULT_BUILDING_NAME);
+  return id;
 }
 
 function addColumn(db, table, column, decl) {
@@ -778,6 +885,7 @@ export const BACKUP_TABLES = [
   'tasks',
   'agents',
   'channel_flags',
+  'buildings',
   'desk_flags',
   'admin_events',
   'personas',
@@ -852,11 +960,13 @@ export function makeStore(db) {
        WHERE channel = @channel AND id = @id AND status != 'done'`
     ),
     touchAgent: db.prepare(
-      // A second session's row starts at its link's start_cursor (see the
-      // column); anybody else's at 0, as it always did.
+      // A second session's row starts at its link's start_cursor, and a
+      // guest's desk at its desk_operators one (see the columns); anybody
+      // else's at 0, as it always did.
       `INSERT INTO agents (channel, agent, last_seen, last_action, last_action_at, poll_cursor)
        VALUES (@channel, @agent, datetime('now'), @action, datetime('now'),
-               COALESCE((SELECT start_cursor FROM desk_twins WHERE channel = @channel AND agent = @agent), 0))
+               MAX(COALESCE((SELECT start_cursor FROM desk_twins WHERE channel = @channel AND agent = @agent), 0),
+                   COALESCE((SELECT start_cursor FROM desk_operators WHERE channel = @channel AND agent = @agent), 0)))
        ON CONFLICT(channel, agent) DO UPDATE SET
          last_seen      = datetime('now'),
          last_action    = COALESCE(@action, last_action),
@@ -867,7 +977,8 @@ export function makeStore(db) {
     setAgentStatus: db.prepare(
       `INSERT INTO agents (channel, agent, last_seen, status, status_detail, status_at, status_expires_at, poll_cursor)
        VALUES (@channel, @agent, datetime('now'), @status, @detail, datetime('now'), datetime('now', @ttl),
-               COALESCE((SELECT start_cursor FROM desk_twins WHERE channel = @channel AND agent = @agent), 0))
+               MAX(COALESCE((SELECT start_cursor FROM desk_twins WHERE channel = @channel AND agent = @agent), 0),
+                   COALESCE((SELECT start_cursor FROM desk_operators WHERE channel = @channel AND agent = @agent), 0)))
        ON CONFLICT(channel, agent) DO UPDATE SET
          last_seen         = datetime('now'),
          status            = @status,
@@ -917,7 +1028,7 @@ export function makeStore(db) {
       `INSERT INTO admin_events (channel, action, actor, target, detail)
        VALUES (@channel, @action, @actor, @target, @detail)`
     ),
-    listChannelFlags: db.prepare(`SELECT channel, archived_at, archived_by FROM channel_flags`),
+    listChannelFlags: db.prepare(`SELECT channel, archived_at, archived_by, building_id FROM channel_flags`),
     // The tasks a desk has to do: open ones assigned to it and the ones it
     // has claimed (wakeDue in src/floor.js).
     wakeTasks: db.prepare(
@@ -1544,7 +1655,7 @@ export function makeStore(db) {
     ),
     setHostRefused: db.prepare(`UPDATE hosts SET refused = ? WHERE host_id = ?`),
     touchHost: db.prepare(`UPDATE hosts SET last_seen = datetime('now') WHERE host_id = ?`),
-    listHosts: db.prepare(`SELECT host_id, name, tmux_session, seats, uploads, signins, signed_out, registered_at, last_seen FROM hosts ORDER BY name`),
+    listHosts: db.prepare(`SELECT host_id, name, tmux_session, seats, uploads, signins, signed_out, registered_at, last_seen, operator, operator_name FROM hosts ORDER BY name`),
     hostUploads: db.prepare(`SELECT uploads FROM hosts WHERE host_id = ?`),
     hostReconnects: db.prepare(`SELECT reconnects FROM hosts WHERE host_id = ?`),
     upsertHostedDesk: db.prepare(
@@ -1587,7 +1698,8 @@ export function makeStore(db) {
       `SELECT d.channel, d.agent, d.host_id, d.cwd, d.sdk_session_id, d.state, d.updated_at,
               d.window_id, d.outside_pid, d.window_open, d.holders, d.clients, d.scope,
               h.name AS host_name, h.last_seen AS host_seen, h.tmux_session AS host_tmux,
-              h.signins AS host_signins, h.signed_out AS host_signed_out, h.refused AS host_refused
+              h.signins AS host_signins, h.signed_out AS host_signed_out, h.refused AS host_refused,
+              h.operator AS host_operator, h.operator_name AS host_operator_name
          FROM hosted_desks d
          LEFT JOIN hosts h ON h.host_id = d.host_id`
     ),
@@ -1649,10 +1761,115 @@ export function makeStore(db) {
     db.prepare('DELETE FROM desk_flags WHERE channel = ? AND agent = ?').run(channel, agent);
   });
 
+  /* ---------- buildings ---------- */
+
+  const BUILDING_NAME_MAX = 60;
+  function listBuildings() {
+    return db.prepare('SELECT id, name, is_default, created_at FROM buildings ORDER BY is_default DESC, created_at, id').all()
+      .map((b) => ({ id: b.id, name: b.name, default: b.is_default === 1, created_at: b.created_at }));
+  }
+  function floorBuildings(channels = q.listAllChannels.all().map((r) => r.channel)) {
+    const known = new Set(db.prepare('SELECT id FROM buildings').all().map((r) => r.id));
+    const def = ensureDefaultBuilding(db);
+    const own = new Map(db.prepare('SELECT channel, building_id FROM channel_flags WHERE building_id IS NOT NULL').all()
+      .map((r) => [r.channel, r.building_id]));
+    const out = new Map();
+    for (const c of channels) {
+      const b = own.get(c);
+      out.set(c, b && known.has(b) ? b : def);
+    }
+    return out;
+  }
+  /** A name an operator typed: trimmed, one line, not empty, not too long, not taken. */
+  function buildingNameError(name, exceptId = null) {
+    if (typeof name !== 'string' || !name.trim()) return 'A building needs a name.';
+    if (/[\r\n]/.test(name)) return 'A building name is one line.';
+    if (name.trim().length > BUILDING_NAME_MAX) return `A building name is at most ${BUILDING_NAME_MAX} characters.`;
+    const taken = db.prepare('SELECT id, name FROM buildings WHERE name = ? COLLATE NOCASE').get(name.trim());
+    if (taken && taken.id !== exceptId) return `There is already a building called "${taken.name}".`;
+    return null;
+  }
+  const createBuilding = db.transaction((name, by = 'operator') => {
+    const error = buildingNameError(name);
+    if (error) return { error, code: 'bad_name' };
+    const id = newBuildingId();
+    db.prepare('INSERT INTO buildings (id, name, is_default) VALUES (?, ?, 0)').run(id, name.trim());
+    logAdmin(SERVER_CHANNEL, 'building.create', { actor: by, target: id, detail: `made building "${name.trim()}"` });
+    return { id, name: name.trim() };
+  });
+  const renameBuilding = db.transaction((id, name, by = 'operator') => {
+    const was = db.prepare('SELECT name FROM buildings WHERE id = ?').get(id);
+    if (!was) return { error: 'No such building.', code: 'no_building' };
+    const error = buildingNameError(name, id);
+    if (error) return { error, code: 'bad_name' };
+    if (was.name === name.trim()) return { id, name: was.name };
+    db.prepare('UPDATE buildings SET name = ? WHERE id = ?').run(name.trim(), id);
+    logAdmin(SERVER_CHANNEL, 'building.rename', { actor: by, target: id, detail: `renamed "${was.name}" to "${name.trim()}"` });
+    return { id, name: name.trim() };
+  });
+  /**
+   * Only an empty building goes, and never the default: a floor is always in
+   * a building, and deleting one with floors would have to choose where they
+   * go, which is the operator's choice to make by moving them first. An
+   * archived floor counts, since it is still the building's.
+   */
+  const deleteBuilding = db.transaction((id, by = 'operator') => {
+    const b = db.prepare('SELECT name, is_default FROM buildings WHERE id = ?').get(id);
+    if (!b) return { error: 'No such building.', code: 'no_building' };
+    if (b.is_default) return { error: `"${b.name}" is the default building, where every new floor arrives, so it cannot be deleted. Rename it instead.`, code: 'default_building' };
+    const floors = [...floorBuildings()].filter(([, bid]) => bid === id).map(([c]) => c);
+    if (floors.length) return { error: `"${b.name}" still has ${floors.length} floor${floors.length === 1 ? '' : 's'} (${floors.join(', ')}). Move them to another building first.`, code: 'building_not_empty', floors };
+    db.prepare('DELETE FROM buildings WHERE id = ?').run(id);
+    db.prepare('UPDATE channel_flags SET building_id = NULL WHERE building_id = ?').run(id);
+    logAdmin(SERVER_CHANNEL, 'building.delete', { actor: by, target: id, detail: `deleted building "${b.name}"` });
+    return { id, deleted: true };
+  });
+  /**
+   * Which building new floors arrive in (costmo, 2026-11-27: the default is
+   * a checkmark that can be moved). A floor with no building of its own is
+   * in the default, so moving the default alone would carry every such
+   * floor with it, a move nobody asked for. So each floor that is in the
+   * old default now is written into it by name first, and only floors that
+   * arrive after the change land in the new one.
+   */
+  const setDefaultBuilding = db.transaction((id, by = 'operator') => {
+    const b = db.prepare('SELECT name, is_default FROM buildings WHERE id = ?').get(id);
+    if (!b) return { error: 'No such building.', code: 'no_building' };
+    if (b.is_default) return { id, name: b.name, moved: false };
+    const old = ensureDefaultBuilding(db);
+    const pin = db.prepare(`INSERT INTO channel_flags (channel, building_id) VALUES (?, ?)
+                ON CONFLICT(channel) DO UPDATE SET building_id = excluded.building_id`);
+    for (const [channel, bid] of floorBuildings()) if (bid === old) pin.run(channel, old);
+    db.prepare('UPDATE buildings SET is_default = 0 WHERE is_default = 1').run();
+    db.prepare('UPDATE buildings SET is_default = 1 WHERE id = ?').run(id);
+    logAdmin(SERVER_CHANNEL, 'building.default', { actor: by, target: id, detail: `made "${b.name}" the default building` });
+    return { id, name: b.name, moved: true };
+  });
+  const setFloorBuilding = db.transaction((channel, id, by = 'operator') => {
+    const b = db.prepare('SELECT name, is_default FROM buildings WHERE id = ?').get(id);
+    if (!b) return { error: 'No such building.', code: 'no_building' };
+    const from = floorBuildings([channel]).get(channel);
+    db.prepare(`INSERT INTO channel_flags (channel, building_id) VALUES (?, ?)
+                ON CONFLICT(channel) DO UPDATE SET building_id = excluded.building_id`).run(channel, id);
+    if (from !== id) logAdmin(channel, 'floor.building', { actor: by, target: channel, detail: `moved to building "${b.name}"` });
+    return { channel, building: id, moved: from !== id };
+  });
+  /**
+   * An operator action's audit row. Done from a page relayed through the
+   * service (src/relay.js), the actor is the person the service signed in,
+   * not the literal `operator`: the board can no longer assume whoever
+   * acted was at this machine's keyboard.
+   */
+  function logAdmin(channel, action, { actor = 'operator', target = null, detail = null } = {}) {
+    const remote = actor === 'operator' ? relayedBy() : null;
+    if (remote) actor = `${remote.name} (remote)`;
+    return n(q.insertAdminEvent.run({ channel, action, actor, target, detail }).lastInsertRowid);
+  }
+
   const purgeChannel = db.transaction((channel, by) => {
     const counts = {};
     for (const table of ['messages', 'tasks', 'contracts', 'contract_history', 'agents',
-      'channel_flags', 'desk_flags', 'agent_sessions', 'turns', 'personas', 'hosted_desks', 'host_outbox', 'meeting_rooms', 'desk_twins', 'room_told']) {
+      'channel_flags', 'desk_flags', 'agent_sessions', 'turns', 'personas', 'hosted_desks', 'host_outbox', 'meeting_rooms', 'desk_twins', 'room_told', 'desk_operators']) {
       counts[table] = db.prepare(`DELETE FROM ${table} WHERE channel = ?`).run(channel).changes;
     }
     q.insertAdminEvent.run({
@@ -1747,6 +1964,11 @@ export function makeStore(db) {
       }
       report[table] = { removed, inserted, ...(ignored.length ? { ignored_columns: ignored } : {}) };
     }
+    // A file from before buildings leaves this table untouched; one that
+    // carries it replaces it whole. Either way there is one default after.
+    // floorBuildings makes one too at its next read, so this is the second
+    // guard: a mutant dropping it survives test:service by design.
+    ensureDefaultBuilding(db);
     return report;
   });
 
@@ -1822,6 +2044,10 @@ export function makeStore(db) {
     const hereIds = {};
     for (const t of ID_TABLES) hereIds[t] = new Map(hereOf(t).filter((r) => !(t === 'admin_events' && ownAudit(r))).map((r) => [ROW_IS[t](r), r.id]));
     const keptAudit = hereOf('admin_events').filter(ownAudit);
+    // Which building this floor is in here is this instance's: the file's id
+    // names a building on the instance it came from. Kept, so a floor brought
+    // over again stays where the operator put it.
+    const hereBuilding = db.prepare('SELECT building_id FROM channel_flags WHERE channel = ?').get(channel)?.building_id ?? null;
 
     const report = {};
     const idMaps = {};
@@ -1889,6 +2115,11 @@ export function makeStore(db) {
         }
       }
       report[t] = { removed, inserted, ...(renumbered ? { renumbered } : {}) };
+    }
+
+    if (hereBuilding) {
+      db.prepare(`INSERT INTO channel_flags (channel, building_id) VALUES (?, ?)
+                  ON CONFLICT(channel) DO UPDATE SET building_id = excluded.building_id`).run(channel, hereBuilding);
     }
 
     // Profiles are per agent: taken only for an agent with none here.
@@ -2153,8 +2384,7 @@ export function makeStore(db) {
       return true;
     },
     purgeChannel,
-    logAdmin: (channel, action, { actor = 'operator', target = null, detail = null } = {}) =>
-      n(q.insertAdminEvent.run({ channel, action, actor, target, detail }).lastInsertRowid),
+    logAdmin,
 
     // --- backup / restore -----------------------------------------------------
     dumpTable: (table) => tableInfo(table).selectAll.all(),
@@ -2182,6 +2412,68 @@ export function makeStore(db) {
       }
       return { adopted, kept };
     }),
+
+    // --- the owner's name, for attribution (board.relay v4) ---------------------
+    /** The last owner identity a relayed request verified (GET /api/relay/hello), or null. */
+    ownerName: () => { try { return JSON.parse(db.prepare("SELECT value FROM settings WHERE key = 'relay.owner'").get()?.value ?? 'null')?.name ?? null; } catch { return null; } },
+    setOwner: (op, name) => db.prepare(`INSERT INTO settings (key, value) VALUES ('relay.owner', ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`).run(JSON.stringify({ op, name })).changes,
+
+    // --- whose a host and a desk are (board.relay v4) ---------------------------
+    setHostOperator: (hostId, op, name) => db.prepare('UPDATE hosts SET operator = ?, operator_name = ? WHERE host_id = ?').run(op ?? null, op ? (name ?? null) : null, hostId).changes,
+    /**
+     * The operator a desk belongs to: {op, name} of its host's guest, {op:
+     * null} for the owner's host, else the guest it was last known as
+     * (desk_operators), else null (nobody's yet).
+     */
+    deskOperator: (channel, agent) => {
+      const r = db.prepare(`SELECT h.operator, h.operator_name FROM hosted_desks d JOIN hosts h ON h.host_id = d.host_id WHERE d.channel = ? AND d.agent = ?`).get(channel, agent);
+      if (r) return { op: r.operator ?? null, name: r.operator_name ?? null };
+      const k = db.prepare('SELECT operator, name FROM desk_operators WHERE channel = ? AND agent = ?').get(channel, agent);
+      return k ? { op: k.operator, name: k.name ?? null } : null;
+    },
+    /**
+     * The guest a desk is. Called on every event batch from a guest's host,
+     * so the same operator again only refreshes the name. A name that becomes
+     * this operator's (new, or an earlier operator's) starts reading at the
+     * floor's newest message: the row's start_cursor, and the agents row's
+     * cursor moved up to it, so its unread count and its polls begin there.
+     */
+    setDeskOperator: (channel, agent, op, name) => {
+      const was = db.prepare('SELECT operator FROM desk_operators WHERE channel = ? AND agent = ?').get(channel, agent);
+      if (was && was.operator === op) {
+        return db.prepare("UPDATE desk_operators SET name = ?, updated_at = datetime('now') WHERE channel = ? AND agent = ?").run(name ?? null, channel, agent).changes;
+      }
+      const start = q.messageHighWater.get().id;
+      const n = db.prepare(`INSERT INTO desk_operators (channel, agent, operator, name, start_cursor) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(channel, agent) DO UPDATE SET operator = excluded.operator, name = excluded.name,
+          start_cursor = excluded.start_cursor, updated_at = datetime('now')`).run(channel, agent, op, name ?? null, start).changes;
+      q.advancePollCursor.run({ channel, agent, cursor: start });
+      return n;
+    },
+    /** Where a guest's desk starts reading (0 for any other desk). */
+    operatorStartOf: (channel, agent) => db.prepare('SELECT start_cursor FROM desk_operators WHERE channel = ? AND agent = ?').get(channel, agent)?.start_cursor ?? 0,
+    clearDeskOperator: (channel, agent) => db.prepare('DELETE FROM desk_operators WHERE channel = ? AND agent = ?').run(channel, agent).changes,
+    desksOfOperator: (op) => db.prepare('SELECT channel, agent FROM desk_operators WHERE operator = ?').all(op),
+    /** A host whose operator's access ended (POST /api/relay/access): unheard from as of now, so it reads offline at once, not after the liveness window. Its next registration, if its access returns, brings it back. */
+    retireHost: (hostId) => db.prepare("UPDATE hosts SET last_seen = datetime('now', '-1 day') WHERE host_id = ?").run(hostId).changes,
+    setHostFiles: (hostId, yes) => db.prepare('UPDATE hosts SET files = ? WHERE host_id = ?').run(yes ? 1 : 0, hostId).changes,
+    hostTakesFiles: (hostId) => db.prepare('SELECT files FROM hosts WHERE host_id = ?').get(hostId)?.files === 1,
+    hostOperator: (hostId) => {
+      const r = db.prepare('SELECT operator, operator_name FROM hosts WHERE host_id = ?').get(hostId);
+      return { op: r?.operator ?? null, name: r?.operator_name ?? null };
+    },
+
+    // --- buildings --------------------------------------------------------------
+    listBuildings,
+    /** channel → building id, every floor resolved (none of its own, or an
+     *  id not here, is the default's). */
+    floorBuildings,
+    createBuilding,
+    renameBuilding,
+    setDefaultBuilding,
+    deleteBuilding,
+    setFloorBuilding,
 
     // --- dashboard reads ------------------------------------------------------
     listAllAgents: () => q.listAllAgents.all(),

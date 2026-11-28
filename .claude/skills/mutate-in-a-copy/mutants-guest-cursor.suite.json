@@ -1,0 +1,17 @@
+[
+ ["guest cursor: same operator check removed (start reset every batch)", "service", "src/db.js",
+  "      if (was && was.operator === op) {\n        return db.prepare(\"UPDATE desk_operators",
+  "      if (false) {\n        return db.prepare(\"UPDATE desk_operators"],
+ ["guest cursor: start at 0", "service", "src/db.js",
+  "      const start = q.messageHighWater.get().id;\n      const n = db.prepare(`INSERT INTO desk_operators",
+  "      const start = 0;\n      const n = db.prepare(`INSERT INTO desk_operators"],
+ ["guest cursor: agents row cursor not moved", "service", "src/db.js",
+  "      q.advancePollCursor.run({ channel, agent, cursor: start });\n      return n;",
+  "      return n;"],
+ ["guest cursor: poll not floored", "service", "src/tools.js",
+  "        store.twinOf(channel, agent)?.start_cursor ?? 0, store.operatorStartOf?.(channel, agent) ?? 0);",
+  "        store.twinOf(channel, agent)?.start_cursor ?? 0);"],
+ ["guest cursor: new agents row starts at 0", "service", "src/db.js",
+  "                   COALESCE((SELECT start_cursor FROM desk_operators WHERE channel = @channel AND agent = @agent), 0)))\n       ON CONFLICT(channel, agent) DO UPDATE SET\n         last_seen      = datetime('now'),",
+  "                   0))\n       ON CONFLICT(channel, agent) DO UPDATE SET\n         last_seen      = datetime('now'),"]
+]

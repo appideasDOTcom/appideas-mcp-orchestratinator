@@ -1,0 +1,9 @@
+[
+ ["another operator's links are drawn", "src/ui/floor.js", "    if (notMine) for (const el of [toVsc, toClaude, toFloor, toSessions, toLeave]) el?.classList.add('hidden');", ""],
+ ["another operator's stop sign is live", "src/ui/floor.js", "      stopBtn.disabled = true;\n      stopBtn.title = `Only ${whose} can stop ${d.persona}`;", "      stopBtn.title = `Only ${whose} can stop ${d.persona}`;"],
+ ["another operator's prompt can be pressed", "src/ui/floor.js", "    for (const el of slot.querySelectorAll('button, input, textarea, select')) if (theirs) el.disabled = true;", ""],
+ ["the sender is never named", "src/ui/floor.js", "    if (t.from) return v.name && t.from === v.name ? 'you' : t.from;", "    if (t.from) return 'you';"],
+ ["a guest's model is the guest's to change anywhere", "src/ui/floor.js", "      const why = !deskMine(d)\n        ?", "      const why = false\n        ?"],
+ ["a guest's Settings has the board's sections", "src/ui/app.js", "  if (ui.state?.viewer?.role === 'guest') return `${autoRefreshSection(compact)}${floorsSection()}`;", ""],
+ ["the box says you answer another's prompt", "src/ui/floor.js", "      ? (!deskMine(d)\n        ?", "      ? (false\n        ?"]
+]

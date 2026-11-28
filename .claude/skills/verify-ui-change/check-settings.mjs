@@ -114,7 +114,7 @@ ok(await sp.evalJs(`document.title`) === 'Settings', 'it is titled Settings', aw
 ok(!(await visible(sp, 'header')) && !(await visible(sp, '#floor')) && !(await visible(sp, '#channels')), 'no header, floor or board on it');
 ok(!(await sp.evalJs(`!!document.querySelector('#set-page [data-set="close"]')`)), 'and no close button: it is a page, not a dialog');
 s = await sections(sp);
-ok(JSON.stringify(s) === JSON.stringify(['set-auto', 'set-floors', 'set-updates', 'Export a backup', 'Recover from a backup']), 'the same sections as the dialog, in its order', JSON.stringify(s));
+ok(JSON.stringify(s) === JSON.stringify(['set-auto', 'set-floors', 'set-buildings', 'set-updates', 'Export a backup', 'Recover from a backup']), 'the same sections as the dialog, in its order (Buildings since the service round)', JSON.stringify(s));
 await sleep(3000);
 const sp1 = await polls(sp);
 ok(sp1.floor === 0 && sp1.state >= 1, 'it polls /api/state and nothing of the floor', JSON.stringify(sp1));

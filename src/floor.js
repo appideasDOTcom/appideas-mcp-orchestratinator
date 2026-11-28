@@ -1,3 +1,6 @@
+import { randomBytes } from 'node:crypto';
+import { hostname } from 'node:os';
+import { requesterOp } from './relay.js';
 import express from 'express';
 import { CAST } from './db.js';
 import { agentBoard, agentLoadIndex, channelCounts, mcpSessionCounts, ZERO_COUNTS } from './agent-state.js';
@@ -983,13 +986,21 @@ export function wakeDue(desks, { work, state, skip = new Map(), blocked = () => 
 export const ROOM_NOTICE_TAG = 'meeting-room';
 /** Text that is wholly one tagged block: what the relay files as `context` (contextTagOf in host/window.js). */
 const WHOLE_TAG = /^\s*<([A-Za-z][\w-]*)>[\s\S]*<\/[A-Za-z][\w-]*>\s*$/;
-export function roomNoticeText(kind, others = []) {
+export function roomNoticeText(kind, others = [], operators = []) {
   const wrap = (t) => `<${ROOM_NOTICE_TAG}>${t}</${ROOM_NOTICE_TAG}>`;
+  const list = (xs) => (xs.length === 1 ? xs[0] : `${xs.slice(0, -1).join(', ')} and ${xs.at(-1)}`);
+  // A room holding two operators' agents (board.relay v5, a shared
+  // building) names both operators: "the operator" alone left it unsaid
+  // which of them was there (desktop-dev's M2 walk, finding b). One
+  // operator reads as it always has.
+  const ops = [...new Set(operators.filter(Boolean))];
+  const several = ops.length > 1;
   if (kind === 'leave') {
-    return wrap('You have left the meeting room and are back on the floor. The operator\'s messages are addressed to you again, and your broadcasts reach the whole floor. This note needs no reply.');
+    return wrap(`You have left the meeting room and are back on the floor. ${several ? 'The operators\' messages are' : 'The operator\'s messages are'} addressed to you again, and your broadcasts reach the whole floor. This note needs no reply.`);
   }
-  const names = others.length ? `${others.length === 1 ? others[0] : `${others.slice(0, -1).join(', ')} and ${others.at(-1)}`} and the operator` : 'the operator';
-  return wrap(`You are now in a meeting room with ${names}. Messages the operator sends to the room go to every agent in it, so they are not necessarily addressed to you, and there is no need to relay them to the others. Answer only what is meant for you. Your broadcasts reach only the room. This note needs no reply.`);
+  const people = several ? `their operators, ${list(ops)}` : 'the operator';
+  const names = others.length ? `${list(others)} and ${people}` : people;
+  return wrap(`You are now in a meeting room with ${names}. Messages ${several ? 'either operator sends' : 'the operator sends'} to the room go to every agent in it, so they are not necessarily addressed to you, and there is no need to relay them to the others. Answer only what is meant for you. Your broadcasts reach only the room. This note needs no reply.`);
 }
 
 /**
@@ -2288,10 +2299,12 @@ const HISTORY_ROWS_MAX = 100;
 const SEARCHES_MAX = 4;
 const QUERY_MIN = 2;
 const QUERY_MAX = 200;
-export function askRescan(store, live, { channel, agent, why, force = false }) {
+export function askRescan(store, live, { channel, agent, why, force = false, operator = undefined }) {
   const now = Date.now();
   const asked = [];
-  for (const h of store.listHosts()) {
+  // `operator`: only that operator's hosts (board.relay v5); undefined for
+  // the board's own asks, which go to every host.
+  for (const h of store.listHosts().filter((x) => operator === undefined || (x.operator ?? null) === operator)) {
     if (secondsSince(iso(h.last_seen), now) >= HOST_STALE_SECONDS) continue;
     if (!force && now - (live.rescanAsked.get(h.host_id) ?? 0) < RESCAN_MIN_MS) continue;
     live.rescanAsked.set(h.host_id, now);
@@ -3105,7 +3118,62 @@ function applyHostEvent(store, live, hostId, ev) {
  * seat — the alternative, waiting for it to also appear on the board, would show
  * an empty room to somebody whose windows are plainly open.
  */
+/**
+ * Who is looking (contract board.relay): a page relayed through the desktop
+ * app's tunnel is `remote`, and the page leaves out what would open on the
+ * board machine's own screen (relay_local_only) rather than offer a button
+ * the board refuses. Everything else is the same page.
+ */
+export function viewerOf(req) {
+  // `machine` is this board's computer, so a remote page can say where it
+  // is: "Headquarters at costmo4.local" (costmo, 2026-11-25). Only to a
+  // remote viewer; at the keyboard it is the machine in front of them.
+  // `role` and `op` say whose desks are the viewer's own (board.relay v4): a
+  // guest's op matches its desks' operator, and the owner's desks have none.
+  if (!req?.relay) return { remote: false };
+  return { remote: true, name: req.relay.name, machine: hostname(), role: req.relay.role, ...(req.relay.role === 'guest' ? { op: req.relay.op } : {}) };
+}
+
+/**
+ * The words a desk is sent, named by who sent them when that is not the
+ * desk's own operator (board.relay v4, "attribution"). Returns {text} or
+ * {refused} for a command from someone else.
+ */
+export function attributedText({ fromOp, fromName, deskOp, deskOpName, ownerName, text, command }) {
+  if ((fromOp ?? null) === (deskOp ?? null)) return { text };
+  if (command) {
+    const whose = deskOp ? (deskOpName ?? 'a guest') : (ownerName ?? 'the board owner');
+    return { refused: { error: `A command is ${whose}'s to give to this desk: it changes the agent's own settings or context. Send it a message instead.`, code: 'desk_not_yours' } };
+  }
+  const name = (fromName ?? '').trim() || (fromOp ? 'a guest' : (ownerName ?? 'the board owner'));
+  return { text: `From ${name}:\n\n${text}` };
+}
+
+/**
+ * A user turn that carries an attribution line (attributedText) leaves the
+ * board as `from` plus the words the sender typed, so the page draws the
+ * sender and its pending-message match still compares what was typed.
+ */
+const FROM_LINE = /^From ([^\n]{1,80}):\n\n([\s\S]*)$/;
+export function fromOf(t) {
+  if (!t || t.role !== 'user' || typeof t.text !== 'string') return t;
+  const m = FROM_LINE.exec(t.text);
+  return m ? { ...t, from: m[1], text: m[2] } : t;
+}
+
+/** Who a guest is, for filtering a payload to its buildings: null for anyone else. */
+export function guestOf(req) {
+  return req?.relay?.role === 'guest' ? req.relay : null;
+}
+
+/** A payload's floors cut to a guest's buildings (board.relay v4, "guest scope"). */
+export function guestFloors(store, relay, channels) {
+  const at = store.floorBuildings(channels);
+  return new Set(channels.filter((c) => relay.buildings.includes(at.get(c))));
+}
+
 export function buildFloor(store, live = null, sessions = null) {
+  const buildingOf = store.floorBuildings?.() ?? new Map();
   const nowMs = Date.now();
   const key = deskKey;
 
@@ -3140,6 +3208,8 @@ export function buildFloor(store, live = null, sessions = null) {
       // handed this entry and read the row's field (hostAway).
       refused: h.host_refused ?? null,
       host_refused: h.host_refused ?? null,
+      // Whose desk it is (board.relay v4): null for the owner's.
+      operator: h.host_operator ? { op: h.host_operator, name: h.host_operator_name ?? null } : null,
       state: h.state,
       cwd: h.cwd,
       sdk_session_id: h.sdk_session_id,
@@ -3353,6 +3423,10 @@ export function buildFloor(store, live = null, sessions = null) {
                 // `uploads` to offer a paperclip or say why not (issue #31).
                 host_id: h.host_id,
                 live: h.live,
+                // Whose desk this is (board.relay v4): {op, name} for a
+                // guest's, null for the owner's. The page offers the desk's
+                // own controls only to its own operator (viewer.op).
+                operator: h.operator,
                 // Refused at its host's last registration, in those words, or
                 // null (hostAway). The page draws the desk and says why.
                 refused: h.refused ?? null,
@@ -3507,7 +3581,7 @@ export function buildFloor(store, live = null, sessions = null) {
               }
             : null,
           last_turn: t
-            ? { role: t.role, text: t.text, tool_name: t.tool_name, via: t.via ?? null, at: iso(t.created_at), id: t.id }
+            ? fromOf({ role: t.role, text: t.text, tool_name: t.tool_name, via: t.via ?? null, at: iso(t.created_at), id: t.id })
             : null,
           // What this agent last said or thought, which is what its thought
           // bubble shows.
@@ -3535,6 +3609,9 @@ export function buildFloor(store, live = null, sessions = null) {
       // Hidden from the building, still reachable by name. The page decides
       // what that means; this only says which channels it is true of.
       archived: shelved,
+      // Which building the floor is in (src/db.js, `buildings`), so the page
+      // can show one building's floors and the board's rows alike.
+      building: buildingOf.get(channel) ?? null,
       desks,
       live: desks.filter((d) => d.live).length,
       awaiting: desks.filter((d) => d.live && (d.session?.awaiting_kind || d.permission?.startup)).length,
@@ -3589,6 +3666,7 @@ export function buildFloor(store, live = null, sessions = null) {
   return {
     now: new Date(nowMs).toISOString(),
     channels,
+    buildings: store.listBuildings?.() ?? [],
     queue,
     hosts,
     cast: CAST,
@@ -3621,8 +3699,23 @@ export function buildFloor(store, live = null, sessions = null) {
   };
 }
 
-export function createFloorRouter({ store, auth, sessions = null, updates = null, protocol = null, version = null, uploads = null }) {
+export function createFloorRouter({ store, auth, sessions = null, updates = null, protocol = null, version = null, uploads = null, closeSessionsFor = null, files = null }) {
   const router = express.Router();
+  const hostMayHold = (guest, hostId, channel, agent) => {
+    if (guest && !guestFloors(store, guest, [channel]).has(channel)) return false;
+    const was = store.hostedDesk(channel, agent);
+    if (!was || was.host_id === hostId) return true;
+    return (store.deskOperator(channel, agent)?.op ?? null) === (guest?.op ?? null);
+  };
+  const attributed = (req, channel, agent, text) => {
+    const desk = store.deskOperator?.(channel, agent) ?? { op: null, name: null };
+    const guest = guestOf(req);
+    return attributedText({
+      fromOp: guest?.op ?? null, fromName: req.relay?.name ?? store.ownerName?.() ?? null,
+      deskOp: desk.op, deskOpName: desk.name, ownerName: store.ownerName?.() ?? null,
+      text, command: !!commandOf(text),
+    });
+  };
   const live = createLive();
   // What this board speaks, for the registration check below. Null only in a
   // test that builds the router by hand; the server always names it.
@@ -3706,8 +3799,14 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     // dropped, when the board asks (reconnectDue).
     // `signin`: it runs Claude Code's sign-in for `signin` work, and
     // `signed_out` is its reading of Claude Code on its machine (host/auth.js).
+    // Whose host this is (board.relay v4): a guest's when it registered
+    // through the relay as one, the owner's otherwise. Said at every
+    // registration, so a host id can't keep a guest's mark it no longer has.
+    const hostGuest = guestOf(req);
     store.registerHost(hostId, name, str(req.body?.tmux), req.body?.seats === true, req.body?.uploads === true, req.body?.reconnect === true,
       { signins: req.body?.signin === true, signedOut: req.body?.signed_out === true });
+    store.setHostOperator?.(hostId, hostGuest?.op ?? null, hostGuest?.name ?? null);
+    store.setHostFiles?.(hostId, req.body?.files === true);
     // Its build, its clone and the board container it found beside it: which
     // host can update this board, and whether it would be refused (issue #40).
     live.updates?.noteHost(hostId, req.body);
@@ -3733,6 +3832,11 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
       const agent = str(d?.agent);
       const cwd = str(d?.cwd);
       if (!channel || !agent || !cwd) continue;
+      // A host files only desks that can be its own (board.relay v4): a
+      // guest's only on floors its card opens, and nobody's a desk another
+      // operator's host runs.
+      if (!hostMayHold(hostGuest, hostId, channel, agent)) continue;
+      if (hostGuest) store.setDeskOperator(channel, agent, hostGuest.op, hostGuest.name);
       store.hostDesk(channel, agent, hostId, cwd, {
         windowId: str(d?.window),
         outsidePid: Number(d?.outside_pid) || null,
@@ -3980,13 +4084,114 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     });
   });
 
+  /* ---------- a file one agent sends another (contract board.files) ---------- */
+
+  // Transfers waiting on the sender's host: id → { sender, to, host, recvHost, note, done, timer }.
+  const transfers = new Map();
+  const fmtSize = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : n >= 1024 ? `${Math.round(n / 1024)} KB` : `${n} bytes`);
+
+  /** The tool's half: check both desks, ask the sender's host, wait for it. */
+  files?.attach({
+    send: ({ channel, agent, to, path, note }, waitMs) => {
+      const no = (code, error) => ({ sent: false, code, error });
+      if (!uploads) return no('no_board', 'This board takes no files.');
+      const from = store.hostedDesk(channel, agent);
+      if (!from) return no('no_host', `No host runs your desk (${agent}), so nothing on your computer can read the file for the board.`);
+      if (!store.hostTakesFiles?.(from.host_id)) return no('host_no_files', `${from.host_name ?? 'Your host'} runs a build from before files could be sent. Update it to send files.`);
+      if (!to || to === agent) return no('no_recipient', 'Name another agent on your floor to send the file to.');
+      const there = store.hostedDesk(channel, to);
+      if (!there && !store.listAllAgents().some((a) => a.channel === channel && a.agent === to)) return no('no_recipient', `There is no agent called ${to} on ${channel}.`);
+      const reach = deliverable(there);
+      if (reach.error) return no('recipient_offline', `${to} cannot take a file right now: ${reach.error}`);
+      const transfer = `ft_${randomBytes(9).toString('hex')}`;
+      return new Promise((resolve) => {
+        const t = { sender: { channel, agent }, to, host: from.host_id, recvHost: there.host_id, note, resolve };
+        t.timer = setTimeout(() => { transfers.delete(transfer); resolve(no('host_slow', `Your host did not send the file within ${Math.round(waitMs / 1000)} s, so nothing reached ${to}.`)); }, waitMs);
+        t.timer.unref?.();
+        transfers.set(transfer, t);
+        store.enqueueHostWork(from.host_id, channel, agent, 'send_file', { transfer, path, cwd: from.cwd });
+        live.wake(from.host_id);
+      });
+    },
+  });
+  const settle = (transfer, result) => {
+    const t = transfers.get(transfer);
+    if (!t) return null;
+    transfers.delete(transfer);
+    clearTimeout(t.timer);
+    t.resolve(result);
+    return t;
+  };
+
+  /**
+   * The file's bytes, from the sender's host: staged as an operator's
+   * attachment is, then sent to the receiver as a message carrying it,
+   * attributed to the agent that sent it. Only for a transfer this board
+   * made, and only from the host it asked.
+   */
+  router.post('/api/host/file', auth.ingestGuard, async (req, res) => {
+    const hostId = str(req.query.host_id);
+    const transfer = str(req.query.transfer);
+    const t = transfer ? transfers.get(transfer) : null;
+    if (!hostId || !t || t.host !== hostId) {
+      req.resume();
+      return res.status(404).json({ error: 'No file is being sent under that transfer from this host.', code: 'no_transfer' });
+    }
+    store.touchHost(hostId);
+    const declared = Number(req.headers['content-length']);
+    if (Number.isFinite(declared) && declared > uploads.maxBytes) {
+      res.set('connection', 'close');
+      settle(transfer, { sent: false, code: 'file', error: `The file is larger than ${Math.round(uploads.maxBytes / 1048576)} MB, the most one send can carry.` });
+      return res.status(413).json({ error: 'too large', code: 'too_large' });
+    }
+    const name = typeof req.query.name === 'string' ? req.query.name : '';
+    const r = await uploads.stage(req, { name, type: 'application/octet-stream' });
+    if (r.error) {
+      if (r.status === 413) res.set('connection', 'close');
+      settle(transfer, { sent: false, code: 'file', error: r.code === 'too_large' ? `The file is larger than ${Math.round(uploads.maxBytes / 1048576)} MB, the most one send can carry.` : r.error });
+      return res.status(r.status).json({ error: r.error, code: r.code });
+    }
+    const file = r.file;
+    uploads.grant([file.id], t.recvHost);
+    // From the sending agent, named as a message from another desk is (the
+    // sender's operator too, when it is not the receiver's).
+    const sendOp = store.deskOperator(t.sender.channel, t.sender.agent);
+    const recvOp = store.deskOperator(t.sender.channel, t.to);
+    const opWord = (sendOp?.op ?? null) !== (recvOp?.op ?? null) ? ` (${sendOp?.op ? (sendOp.name ?? 'a guest') : (store.ownerName?.() ?? 'the board owner')}'s agent)` : '';
+    // The board's own "From <name>:" line (attributedText), so the floor
+    // draws the sending agent as the speaker (fromOf), then the file.
+    const text = `From ${t.sender.agent}${opWord}:\n\nA file: ${file.name} (${fmtSize(file.size)}).${t.note ? `\n\n${t.note}` : ''}`;
+    store.enqueueHostWork(t.recvHost, t.sender.channel, t.to, 'chat', { text, files: [{ id: file.id, name: file.name, size: file.size }], attached_by: t.sender.agent });
+    live.wake(t.recvHost);
+    uploads.sweep();
+    settle(transfer, { sent: true, to: t.to, name: file.name, size: file.size, transfer });
+    res.json({ ok: true, id: file.id });
+  });
+
+  /** The sender's host could not send it: its words go back to the agent that asked. */
+  router.post('/api/host/file/fail', auth.ingestGuard, (req, res) => {
+    const hostId = str(req.body?.host_id);
+    const transfer = str(req.body?.transfer);
+    const t = transfer ? transfers.get(transfer) : null;
+    if (!hostId || !t || t.host !== hostId) return res.status(404).json({ error: 'No file is being sent under that transfer from this host.', code: 'no_transfer' });
+    const message = String(req.body?.message ?? '').slice(0, 300) || 'the file could not be read';
+    settle(transfer, { sent: false, code: 'file', error: `Your host could not send it: ${message}. Nothing reached ${t.to}.` });
+    res.json({ ok: true });
+  });
+
   /** What a host's desks are doing. A batch, because a streaming reply would
    *  otherwise be one HTTP request per token. */
   router.post('/api/host/events', auth.ingestGuard, (req, res) => {
     const hostId = str(req.body?.host_id);
     if (!hostId) return res.status(400).json({ error: 'host_id is required' });
     store.touchHost(hostId);
-    const events = Array.isArray(req.body?.events) ? req.body.events : [];
+    const guest = guestOf(req);
+    // The same rule for what a host says about a desk (board.relay v4): an
+    // event naming a floor outside a guest's card, or another operator's
+    // desk, is not applied.
+    const events = (Array.isArray(req.body?.events) ? req.body.events : [])
+      .filter((ev) => !ev?.channel || !ev?.agent || hostMayHold(guest, hostId, String(ev.channel), String(ev.agent)));
+    if (guest) for (const ev of events) if (ev?.channel && ev?.agent) store.setDeskOperator(String(ev.channel), String(ev.agent), guest.op, guest.name);
     let applied = 0;
     for (const ev of events) {
       try {
@@ -4009,9 +4214,11 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
    * list has `at: null`, which is not the same thing as an empty list and is
    * drawn differently. `names` rides along for the same dialog.
    */
-  router.get('/api/floor/folders', (_req, res) => {
+  router.get('/api/floor/folders', (req, res) => {
     const nowMs = Date.now();
-    const hosts = store.listHosts().map((h) => {
+    // Only the asker's own hosts' folders (board.relay v5): a guest's folders
+    // are on the guest's computer, and the owner's on the owner's.
+    const hosts = store.listHosts().filter((h) => (h.operator ?? null) === requesterOp(req)).map((h) => {
       const f = live.folders.get(h.host_id);
       return {
         host_id: h.host_id,
@@ -4063,7 +4270,20 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
       id: r.id, channel: r.channel, open: r.live, holding: roomHolds(live, r, nowMs, ended),
       present: r.participants.filter((p) => !p.absent).map((p) => p.agent),
     }));
+    // Whose each room's desks are, so a room with two operators names both.
+    const operatorsIn = (channel, room) => {
+      const r = rooms.find((x) => x.id === room && x.channel === channel);
+      const ops = (r?.present ?? []).map((a) => store.deskOperator?.(channel, a)).filter(Boolean);
+      const named = ops.map((o) => (o.op ? (o.name ?? 'a guest') : (store.ownerName?.() ?? 'the board owner')));
+      return new Set(named).size > 1 ? named : [];
+    };
     const twins = new Set(store.listTwins().filter((t) => t.for_meeting).map((t) => deskKey(t.channel, t.agent)));
+    // On the way back out the room is gone, so the leave note names
+    // operators only when this desk is a guest's (a mixed room it left).
+    const operatorsOfDesk = (channel, agent) => {
+      const o = store.deskOperator?.(channel, agent);
+      return o?.op ? [o.name ?? 'a guest', store.ownerName?.() ?? 'the board owner'] : [];
+    };
     for (const n of roomNoticePlan(rooms, store.listRoomTold(), twins)) {
       if (n.kind === 'forget') { store.clearRoomTold(n.channel, n.agent); continue; }
       if (n.kind === 'quiet') { store.setRoomTold(n.channel, n.agent, n.room); continue; }
@@ -4074,16 +4294,129 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
       }
       if (check.error || askingWhy(live.pending.get(deskKey(n.channel, n.agent))) || signedOutWhy(check.hosted)) continue;
       // `notice`: the host types it only into an empty box (F2, 0.14.5 review).
-      store.enqueueHostWork(check.hosted.host_id, n.channel, n.agent, 'chat', { text: roomNoticeText(n.kind, n.others), notice: true });
+      store.enqueueHostWork(check.hosted.host_id, n.channel, n.agent, 'chat', { text: roomNoticeText(n.kind, n.others, n.kind === 'enter' ? operatorsIn(n.channel, n.room) : operatorsOfDesk(n.channel, n.agent)), notice: true });
       live.wake(check.hosted.host_id);
       if (n.kind === 'enter') store.setRoomTold(n.channel, n.agent, n.room);
       else store.clearRoomTold(n.channel, n.agent);
     }
   };
 
-  router.get('/api/floor', (_req, res) => {
+  /**
+   * The owner's name, for attribution (board.relay v4): the app calls this,
+   * owner-signed, at each tunnel ready, so a message the owner types at the
+   * keyboard to a guest's agent is named before anyone has acted remotely.
+   */
+  router.get('/api/relay/hello', (req, res) => {
+    if (req.relay?.role !== 'owner') return res.status(403).json({ error: 'Only the board owner\'s relayed request says who the owner is.', code: 'relay_role' });
+    store.setOwner(req.relay.op, req.relay.name);
+    res.json({ ok: true, owner: { op: req.relay.op, name: req.relay.name } });
+  });
+
+  /**
+   * A guest's access changed (board.relay v6; desktop-dev's M2 walk, finding
+   * a): the service revoked a card or the owner unshared a building, and the
+   * guest's side ends at once while its host's own goodbye is refused, so
+   * without this the owner's floor showed the guest's desks live until the
+   * liveness timeout (about 90 s). Owner-signed only, from the app's hop,
+   * which hears it from the service. `buildings`: what the guest's cards
+   * still open here ([] for none). Its desks on any other floor leave the
+   * floor, and with none left its hosts go offline.
+   */
+  router.post('/api/relay/access', (req, res) => {
+    if (req.relay?.role !== 'owner') return res.status(403).json({ error: 'Only the board owner\'s relayed request changes a guest\'s access.', code: 'relay_role' });
+    const op = str(req.body?.op);
+    const still = Array.isArray(req.body?.buildings) ? req.body.buildings.filter((b) => typeof b === 'string') : null;
+    if (!op || !still) return res.status(400).json({ error: 'op and buildings are required' });
+    const hosts = store.listHosts().filter((h) => h.operator === op).map((h) => h.host_id);
+    const keep = { op, buildings: still };
+    const dropped = [];
+    // Its hosts' desks, and every desk the board knows as its own though no
+    // host of it runs the desk now (desk_operators): a window that died
+    // without a goodbye left such a desk reading live, waiting on a prompt
+    // (desktop-dev's revoke re-walk).
+    const seen = new Set();
+    const theirs = [...store.listHostedDesks().filter((x) => hosts.includes(x.host_id)), ...store.desksOfOperator(op)]
+      .filter((d) => { const k = deskKey(d.channel, d.agent); if (seen.has(k)) return false; seen.add(k); return true; })
+      .filter((d) => { const o = store.deskOperator(d.channel, d.agent); return !o || o.op === op; });
+    // `paused` (board.relay v7; desktop-dev's M3 walk, note a): the owner's
+    // subscription lapsed, and the service promises a renewal restores
+    // everything. So a paused guest's desks are not taken off the floor: they
+    // go offline where they stand (their connection closed, their sessions
+    // ended, their host unheard from), keep their seat, their host row and
+    // their name, and come back live when the guest's host registers again
+    // after the renewal. A revoke or an unshare (no `paused`) is final, and
+    // removes them as before.
+    const paused = req.body?.paused === true;
+    for (const d of theirs) {
+      if (guestFloors(store, keep, [d.channel]).has(d.channel)) continue;
+      const k = deskKey(d.channel, d.agent);
+      live.pending.delete(k);
+      live.partial.delete(k);
+      if (paused) {
+        closeSessionsFor?.({ channel: d.channel, agent: d.agent });
+        store.endDeskSessions(d.channel, d.agent);
+        live.publish(k, { type: 'state', state: 'offline' });
+        dropped.push({ channel: d.channel, agent: d.agent });
+        continue;
+      }
+      store.unseat(d.channel, d.agent);
+      // And off the floor, as a move retires the row it leaves: its board
+      // connection is closed and its agent row retired, so nothing still
+      // reads it as present (desktop-dev's revoke re-walk: live for 2½ min
+      // after the desk left, on its MCP presence). Its card coming back
+      // brings it back: an MCP connect un-retires it, as for any agent.
+      closeSessionsFor?.({ channel: d.channel, agent: d.agent });
+      store.retireAgent(d.channel, d.agent);
+      // A desk known only by its window's hooks has no agent row to retire;
+      // its sessions ending is what stops it reading live (a prompt it was
+      // waiting on would keep it live for ever). Behind the retire, so a
+      // mutant dropping this line survives test:service by design.
+      store.endDeskSessions(d.channel, d.agent);
+      // The name is free again: the desk has left the floor, and a desk
+      // name kept by an operator who can no longer come in blocked anyone
+      // else from taking it (desktop-dev's M3 walk, finding b).
+      store.clearDeskOperator?.(d.channel, d.agent);
+      live.publish(k, { type: 'state', state: 'offline' });
+      dropped.push({ channel: d.channel, agent: d.agent });
+    }
+    if (!still.length) for (const h of hosts) { store.setHostState(h, 'offline'); store.retireHost(h); }
+    const detail = paused
+      ? `a guest's access is paused (the owner's subscription lapsed); ${dropped.length} desk(s) offline until it is renewed`
+      : still.length ? `a guest's access now opens ${still.length} building(s); ${dropped.length} desk(s) left the floor` : `a guest's access ended; ${dropped.length} desk(s) left the floor`;
+    store.logAdmin('(server)', 'relay.access', { target: op, detail });
+    res.json({ ok: true, op, ...(paused ? { paused: dropped } : { dropped }), hosts_offline: still.length ? [] : hosts });
+  });
+
+  router.get('/api/floor', (req, res) => {
     sweep();
-    res.json(buildFloor(store, live, sessions));
+    // `owner`: the owner's name as the board last verified it (relay hello),
+    // so the page names whose a desk is rather than "the board owner".
+    const out = { ...buildFloor(store, live, sessions), viewer: viewerOf(req), owner: store.ownerName?.() ?? null };
+    // Whose each desk is, for this viewer (board.relay v6; desktop-dev's
+    // walk: Pat's floor said "1 need you", with the red mark, for a question
+    // only Chris can answer). `mine` is false on another operator's desk; its
+    // questions are not this viewer's to answer, so they are not counted as
+    // needing them, and the page draws such a desk as busy, not asking.
+    const me = requesterOp(req);
+    const mineOf = (channel, agent) => { const o = store.deskOperator?.(channel, agent); return !o || (o.op ?? null) === me; };
+    for (const c of out.channels) {
+      for (const d of c.desks) d.mine = mineOf(c.channel, d.agent);
+      c.awaiting = c.desks.filter((d) => d.mine && d.live && (d.session?.awaiting_kind || d.permission?.startup)).length;
+    }
+    out.queue = out.queue.filter((q) => mineOf(q.channel, q.agent));
+    out.totals = { ...out.totals, awaiting: out.queue.length };
+    const guest = guestOf(req);
+    if (guest) {
+      // A guest sees its card's buildings and nothing else (board.relay v4).
+      const keep = guestFloors(store, guest, out.channels.map((c) => c.channel));
+      out.channels = out.channels.filter((c) => keep.has(c.channel));
+      out.queue = out.queue.filter((q) => keep.has(q.channel));
+      out.meetings_held = out.meetings_held.filter((m) => keep.has(m.channel));
+      out.buildings = out.buildings.filter((b) => guest.buildings.includes(b.id));
+      const t = out.channels.filter((c) => !c.archived);
+      out.totals = { channels: t.length, desks: t.reduce((n, c) => n + c.desks.length, 0), live: t.reduce((n, c) => n + c.live, 0), awaiting: out.queue.length, hosted: t.reduce((n, c) => n + c.desks.filter((d) => d.hosted?.live).length, 0), archived: out.channels.length - t.length };
+    }
+    res.json(out);
   });
 
   /**
@@ -4101,7 +4434,7 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     // A conversation can span session ids — a fork carries its parent's
     // history — so the filter is the chain, not the one id.
     const sessions = session ? store.sessionChain(session) : null;
-    const rows = store.recentTurns(channel, agent, { since, limit, sessions }).map((r) => ({
+    const rows = store.recentTurns(channel, agent, { since, limit, sessions }).map((r) => fromOf({
       ...r,
       created_at: iso(r.created_at),
     }));
@@ -4151,7 +4484,8 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     const unsubs = desks.map(([channel, agent]) => {
       const key = deskKey(channel, agent);
       const send = (ev) => {
-        try { res.write(`data: ${JSON.stringify(tagged ? { ...ev, channel, agent } : ev)}\n\n`); } catch { /* closed */ }
+        const out = ev?.type === 'turn' && ev.turn ? { ...ev, turn: fromOf(ev.turn) } : ev;
+        try { res.write(`data: ${JSON.stringify(tagged ? { ...out, channel, agent } : out)}\n\n`); } catch { /* closed */ }
       };
       // What's true right now, so a panel that just opened doesn't wait for the
       // next event to learn there is a reply mid-stream or a prompt open.
@@ -4332,7 +4666,15 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     // Mark where the conversation stood, so the delivery report can tell this
     // message's turn from an older one that says the same words — see sentAfter.
     live.sentAfter.set(deskKey(channel, agent), store.deskLastUserTurn(channel, agent)?.id ?? 0);
-    store.enqueueHostWork(h.host_id, channel, agent, 'chat', files.length ? { text, files } : { text });
+    // Attribution (board.relay v4; costmo 2026-11-24 and -25, talk runs both
+    // ways and always names its sender). A message from anyone but the desk's
+    // own operator reaches the agent with "From <name>:" as its first line,
+    // and the page draws that name on the bubble (fromLine in src/ui/floor.js).
+    // A command is the desk's own operator's to give: it is the agent's
+    // settings and context, not a message to it.
+    const said = attributed(req, channel, agent, text);
+    if (said.refused) return res.status(403).json(said.refused);
+    store.enqueueHostWork(h.host_id, channel, agent, 'chat', files.length ? { text: said.text, files } : { text: said.text });
     live.wake(h.host_id);
     res.json({ ok: true, host: h.host_name ?? h.host_id, ...(files.length ? { files: files.length } : {}) });
   });
@@ -4457,6 +4799,18 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
       return res.status(400).json({ error: 'host_id, path, channel and agent are required' });
     }
     if (!NAME_RE.test(agent) || !floorNameOk(channel)) return res.status(400).json({ error: NAME_WHY, code: 'bad_name' });
+    // A desk name another operator holds is theirs (board.relay v5): refused
+    // here, in words, rather than accepted and then left unfiled when the
+    // host registers it (desktop-dev's M3 walk, finding b: a 200 "release"
+    // and then desk_not_yours on the agent).
+    {
+      const held = store.deskOperator?.(channel, agent);
+      const mineNow = (held?.op ?? null) === requesterOp(req);
+      if (held && !mineNow) {
+        const whose = held.op ? (held.name ?? 'a guest') : (store.ownerName?.() ?? 'the board owner');
+        return res.status(403).json({ error: `${agent} on ${channel} is ${whose}'s desk. Take it under another name.`, code: 'desk_not_yours' });
+      }
+    }
     let persona = null;
     if (req.body?.persona !== undefined && str(req.body.persona)) {
       persona = str(req.body.persona);
@@ -4479,6 +4833,13 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     const folder = fromPicker ?? offered?.folders.find((f) => f.path === path) ?? null;
     if (!folder) {
       return res.status(409).json({ error: `That folder is not one ${hostRow.name} has shown. Open it in the picker first.`, code: 'unknown_folder' });
+    }
+    // A new floor is made in the building the page was showing (`building`,
+    // sent only for a floor typed new). A floor that already exists stays in
+    // the building it is in: a take is not a move between buildings.
+    const building = str(req.body?.building);
+    if (building && !store.listAllChannels().includes(channel) && store.listBuildings().some((b) => b.id === building)) {
+      store.setFloorBuilding(channel, building);
     }
     // `seat`: "New desk here" — a second desk for the folder's agent, on this
     // floor, with a session of its own; the folder's own desk is left as it is.
@@ -4884,7 +5245,9 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
    * therefore not in the list. A history that covered half the machines and
    * did not say so is the thing this was built not to be.
    */
-  const hostsNow = (nowMs) => store.listHosts().map((h) => ({
+  // Only the asker's own hosts (board.relay v5): history reads a host's own
+  // transcripts, which are its operator's.
+  const hostsNow = (nowMs, req = null) => store.listHosts().filter((h) => (h.operator ?? null) === requesterOp(req)).map((h) => ({
     host_id: h.host_id, name: h.name ?? h.host_id,
     live: secondsSince(iso(h.last_seen), nowMs) < HOST_STALE_SECONDS,
   }));
@@ -4894,9 +5257,9 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
   const newestFirst = (a, b) => (Date.parse(b.last_at ?? b.modified_at ?? '') || 0) - (Date.parse(a.last_at ?? a.modified_at ?? '') || 0);
   const personasNow = () => new Map(store.listPersonas().map((p) => [deskKey(p.channel, p.agent), p.persona]));
 
-  router.post('/api/floor/history/recent', auth.adminGuard, (_req, res) => {
+  router.post('/api/floor/history/recent', auth.adminGuard, (req, res) => {
     const nowMs = Date.now();
-    const hosts = hostsNow(nowMs);
+    const hosts = hostsNow(nowMs, req);
     const asked = [];
     for (const h of hosts.filter((x) => x.live)) {
       const held = live.recent.get(h.host_id);
@@ -4912,10 +5275,10 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     res.json({ ok: true, asked, hosts });
   });
 
-  router.get('/api/floor/history/recent', (_req, res) => {
+  router.get('/api/floor/history/recent', (req, res) => {
     const nowMs = Date.now();
     const personas = personasNow();
-    const hosts = hostsNow(nowMs).map((h) => {
+    const hosts = hostsNow(nowMs, req).map((h) => {
       const held = live.recent.get(h.host_id);
       return { ...h, at: held?.at ?? null, asked: !!held, error: held?.error ?? null, rows: held?.rows?.length ?? 0 };
     });
@@ -4929,7 +5292,7 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     if (query.length < QUERY_MIN) return res.status(400).json({ error: `Search for at least ${QUERY_MIN} characters.`, code: 'short_query' });
     if (query.length > QUERY_MAX) return res.status(400).json({ error: `A search is ${QUERY_MAX} characters at most.`, code: 'long_query' });
     const nowMs = Date.now();
-    const hosts = hostsNow(nowMs);
+    const hosts = hostsNow(nowMs, req);
     const liveHosts = hosts.filter((h) => h.live);
     if (!liveHosts.length) {
       return res.status(409).json({ error: 'No host is on this board right now, and the conversations are on the hosts\' disks — there is nothing to search.', code: 'no_host' });
@@ -4954,7 +5317,7 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
     if (!held) return res.status(404).json({ error: 'That search is not held any more. Search again.', code: 'no_search' });
     const nowMs = Date.now();
     const personas = personasNow();
-    const hosts = hostsNow(nowMs).map((h) => {
+    const hosts = hostsNow(nowMs, req).map((h) => {
       const mine = held.hosts.get(h.host_id);
       return {
         ...h, asked: !!mine, at: mine?.at ?? null, error: mine?.error ?? null,
@@ -5202,9 +5565,12 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
   });
 
   /** Recent meeting rooms, newest first: the Resume list. Personas are the board's, so every viewer reads one name. */
-  router.get('/api/floor/meetings', (_req, res) => {
+  router.get('/api/floor/meetings', (req, res) => {
     const personas = personasNow();
-    res.json({ keep: MEETINGS_KEEP, rows: store.recentMeetings(MEETINGS_KEEP).map((r) => roomOut(r, personas)) });
+    const guest = guestOf(req);
+    let rows = store.recentMeetings(MEETINGS_KEEP);
+    if (guest) { const keep = guestFloors(store, guest, [...new Set(rows.map((r) => r.channel))]); rows = rows.filter((r) => keep.has(r.channel)); }
+    res.json({ keep: MEETINGS_KEEP, rows: rows.map((r) => roomOut(r, personas)) });
   });
 
   /**
@@ -5220,7 +5586,7 @@ export function createFloorRouter({ store, auth, sessions = null, updates = null
   router.post('/api/floor/rescan', auth.adminGuard, (req, res) => {
     const channel = str(req.body?.channel) ?? '*';
     const agent = str(req.body?.agent) ?? '*';
-    const asked = askRescan(store, live, { channel, agent, why: 'asked from the floor', force: true });
+    const asked = askRescan(store, live, { channel, agent, why: 'asked from the floor', force: true, operator: requesterOp(req) });
     if (!asked.length) {
       return res.status(409).json({
         error: 'No host is registered on this board right now, so there is nobody to ask. Start one and it will find the repo on its own.',

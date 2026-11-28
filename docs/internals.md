@@ -49,7 +49,8 @@ npm start            # MCP on /mcp, dashboard on /, db at ./data/orchestratinato
 npm run smoke        # end-to-end self-test (spawns its own server, cleans up)
 npm test             # every suite — coordination (smoke), operator actions,
                      #   the doors, the board's log, the capture, the floor,
-                     #   markdown, the plugin, updates, the host, the window
+                     #   markdown, the plugin, updates, the host, seats, the
+                     #   agent protocol and the transcript reader
 ```
 
 The host can also run by hand instead of as a LaunchAgent:
@@ -76,8 +77,8 @@ its own — the plugin used to be bumped alone every time a hook changed — and
 the suite goes red instead of the board quietly advertising a build nobody has.
 
 **The protocol number is separate from the version, and is checked.**
-`protocol` in `package.json` and `host/package.json` (one integer, `1` since
-0.12.5) is the host↔board protocol: what crosses `/api/host/*` — the
+`protocol` in `package.json` and `host/package.json` (one integer, `2` since
+0.15.0, when each desk became a process the host speaks to as data) is the host↔board protocol: what crosses `/api/host/*` — the
 register body and reply, the work items, the events. The board reads its
 own off `package.json` (`/health` and `/api/state` carry it), the host
 reads its own off `host/package.json` and sends it on every registration,
@@ -109,6 +110,14 @@ See `.env.example`:
   auto-reopens.
 - `SESSION_TTL_MINUTES` — default `15`; how long an untouched MCP session is
   kept.
+- `STATUS_TTL_SECONDS` — default `900`; how long a status an agent sets stays
+  believable unless it says otherwise.
+- `TURN_RETENTION` — default `400`; how many recent turns the board keeps per
+  desk (the full history stays in the transcripts on each computer).
+- `ORCH_WAKE_AFTER_MS` — default `60000`; how long a desk with work waiting
+  and nothing running sits before the floor wakes it.
+- `ORCH_BOARD_SUPERVISOR=app` — set by the desktop app on its own board: no
+  update checks and no Update button, because the app updates itself.
 
 Updates (issue #40) — the defaults are what a real board wants; the rest
 exist for the suites:
@@ -141,6 +150,10 @@ The host under the desktop app (tasks #288–#290 on the desktop channel):
   the host, asked over Electron's `process.parentPort` or Node's IPC
   channel; the messages are in the header of `host/dialog.js`. Any other
   value is a program to run in the dialog's place (the suites' stand-in).
+- `ORCH_HOST_ID` — the host's name on the board; defaults to the computer's
+  hostname. Give a second host on the same computer its own.
+- `ORCH_NODE` — the Node 24 the launchd host runs on, when the one on PATH
+  is older (`host/node.sh` otherwise finds one).
 - `ORCH_HOST_PROTOCOL` — the suites only: stand in for a host from another
   build. Nothing installed sets it.
 
@@ -150,6 +163,18 @@ just means a client opens a session per turn, which is normal and handled.
 
 ## How it works
 
+- **A desk's Claude Code:** the host runs each desk's Claude Code as a
+  process of its own and speaks to it as data: `claude -p --input-format
+  stream-json --output-format stream-json --verbose
+  --permission-prompt-tool stdio --replay-user-messages`
+  ([`host/agent.js`](../host/agent.js), one desk in
+  [`host/desk.js`](../host/desk.js)). A message is a record, delivered when
+  Claude Code says it has taken it; a permission or a question arrives as a
+  `can_use_tool` request and is answered the same way. Nothing reads a
+  screen, and there is no tmux. The host starts a desk's process only when
+  something asks for it (a message, Open, a take), checks each new Claude
+  Code version with its own probe ([`host/canary.js`](../host/canary.js)),
+  and the board wakes a desk that has work waiting and nothing running.
 - **Transport:** Streamable HTTP (`@modelcontextprotocol/sdk`), so multiple VS
   Code windows connect to one shared process. (stdio would spawn a *separate*
   server per window with no shared state — which defeats the purpose.)
@@ -167,7 +192,7 @@ just means a client opens a session per turn, which is normal and handled.
   (presence), `channel_flags` (archive), `desk_flags` (a desk hidden by
   hand), `admin_events` (operator audit) — all
   keyed by `channel` — plus the floor's tables: `agent_sessions` and `turns`
-  (what each window reported), `agent_profile` and `personas` (who each agent
+  (what each session reported), `agent_profile` and `personas` (who each agent
   is and where it sits), `hosts`, `hosted_desks`, `host_outbox`,
   `saved_prompts`, `meeting_rooms` and `desk_twins` (a second session of an
   agent on a floor it already has a desk on). See [`src/db.js`](../src/db.js). A channel is never a row of
@@ -197,13 +222,13 @@ just means a client opens a session per turn, which is normal and handled.
   writes the asked-for side when the text is `/model <name>` or `/effort
   <level>`, refuses a bare `/model` and an unknown level, and hands every
   slash command to the host as chat work. The host answers with two events
-  of its own: `receipt` (a command confirmed on its own receipt — the
-  sentence, and for a `/model` or `/effort` the model and effort the
-  window's own line names) and `model`
-  (the model the transcript's latest reply names). A change that was not
-  made clears the asked-for side: the host's `error` names the `command`
-  it was typing, and a `/model` or `/effort` receipt can confirm nothing
-  (the window's "Model 'x' not found"). `FLOOR_COMMANDS` in
+  of its own: `receipt` (a command confirmed by Claude Code's own answer:
+  `/model` is its `set_model` control request and `/effort` its
+  `apply_flag_settings`, each also saved as the default for new sessions)
+  and `model` (the model and effort Claude Code reports, asked with
+  `get_settings` as soon as a conversation is named, and the model the
+  latest reply names). A change that was not made clears the asked-for
+  side: the host's `error` names the `command` it was carrying out. `FLOOR_COMMANDS` in
   [`src/floor.js`](../src/floor.js) is the list the composer offers; the
   page carries the same list, and `test/floor.mjs` checks the two agree.
 - **Dashboard:** a separate Express router on the same port. `GET /api/state`
@@ -228,8 +253,9 @@ just means a client opens a session per turn, which is normal and handled.
   file's own rows intersected with the live schema, which is what lets a file
   survive a migration in either direction. The reload is one `db.transaction`
   over every table, because a half-restored board is worse than a refused one.
-  `/api/admin/backup/restore` is the single route with a raised body limit
-  (`RESTORE_BODY_LIMIT`, default 128mb); everything else stays capped at 4mb.
+  The restore routes (the whole board, and one floor of a backup) take a raised
+  body limit (`RESTORE_BODY_LIMIT`, default 128mb); everything else stays
+  capped at 4mb.
 - **Self-heal:** a claim with no completion after `CLAIM_TTL_MINUTES` (default
   15) reverts to `open` on the next open-poll, so an abandoned claim (agent
   claimed a task, then its turn died) can't sit invisibly in `claimed`.
@@ -267,8 +293,8 @@ just means a client opens a session per turn, which is normal and handled.
   board would derive from its id.
 - **The folder dialog:** "Take a desk" chooses its folder in the operating
   system's own dialog, opened by the host on the machine it runs on. One
-  function, `host/dialog.js`, with a backend per platform — macOS only so
-  far, and that file's header is the record of why it is the backend it is
+  function, `host/dialog.js`, with a backend per platform — macOS,
+  Windows, and asking the desktop app when the app started the host — and that file's header is the record of why it is the backend it is
   (four ways were watched from a LaunchAgent; three are drawn and never take
   focus, or outlive their process) and why it is not a library (the one on
   npm that runs on a Mac is one of the three). A host says whether it has a
@@ -325,8 +351,8 @@ just means a client opens a session per turn, which is normal and handled.
   `ifAvailable`, and `here` on the `orch.popouts` BroadcastChannel carrying
   `meeting`), so the floor's panel, the detach button and a floor nudge all
   step aside for it exactly as they do for a popout. Its stream is the
-  SharedWorker's, asked for every participant. The board adds no route that
-  types into a window: a room's message is one `POST /api/floor/chat` per
+  SharedWorker's, asked for every participant. The board adds no route of its own for
+  delivery: a room's message is one `POST /api/floor/chat` per
   recipient, in `nudgePlan`'s order, and each desk's delivery is read off
   that desk's own turns and delivery note (`meetingEntry`). What the board
   keeps is `meeting_rooms`, for Resume: the floor and each participant's
@@ -345,9 +371,9 @@ just means a client opens a session per turn, which is normal and handled.
   `messages.audience`, which `pollMessages`, `unreadCounts` and
   `unreadMessages` honour. Direct messages are unaffected.
 - **One agent, several sessions (0.12.9):** a folder's binding names one
-  desk, so a second session in the same folder is a window started with a
-  binding of its own, `claude --mcp-config <file>`, whose entry takes the
-  folder's place in that window ([`host/seats.js`](../host/seats.js) has
+  desk, so a second session in the same folder is a Claude Code process
+  started with a binding of its own, `--mcp-config <file>`, whose entry
+  takes the folder's place for that process ([`host/seats.js`](../host/seats.js) has
   what was measured). The host calls such a desk a **seat**: a record of
   its own beside `host.json` (`seats/seats.json`), a binding file per seat
   (mode 600; it holds the key, as `~/.claude.json` does), and its own
@@ -382,10 +408,14 @@ src/
   palette.js  The avatar colours, shared by server validation and the picker
   web.js      Dashboard router: /api/state, /api/activity, /api/admin/*, static UI
   auth.js     The shared-secret guard on /mcp + /api/ingest, and the cross-origin check on writes
-  backup.js   Export and restore the whole board as one JSON document
+  backup.js   Export and restore the whole board (or one floor of it) as JSON
+  updates.js  The page's update check and the update runs it starts
+  uploads.js  Files attached to a message, staged until each host fetches them
   ui/         The dashboard page (no build step, no external assets)
 host/         The workstation service that runs each desk's Claude Code
-              (seats.js: a second desk in a folder that is already one)
+              (agent.js: the stream-JSON process; desk.js: one desk;
+              claude.js: Claude Code's files and roster; seats.js: a second
+              desk in a folder that is already one; canary.js: the probe)
 plugin/       The Claude Code plugin (orchestratinator-floor) — the floor's hooks
 clients/      Ready-to-copy .mcp.json files + a CLAUDE.md snippet
 scripts/
@@ -393,3 +423,82 @@ scripts/
 test/         Thirteen suites; test:host and test:seats run a real host against
               a real server, with a stream-JSON stand-in for Claude Code
 ```
+
+## Operator actions, in detail
+
+The reference behind the table in [Using the floor](operating.md).
+
+Sooner or later the board shows something only a human can resolve: an agent
+you stopped days ago, still holding 139 unread; a task nobody will
+ever claim; a channel you created by typo. Hover a row and you get the small
+set of actions for that: the unread and task counts become buttons that open
+the pending messages and tasks themselves, and a trash can appears on each
+agent row (the channel header gets its own).
+
+Nothing here is a new power. `complete_task` has never had an ownership check
+and `poll_messages` has always taken an `agent` override, so any connected
+agent could already close anyone's task and advance anyone's cursor. These
+buttons make that deliberate, attribute it to `operator`, and write it where
+the log can show it.
+
+| Action | What it does |
+| --- | --- |
+| **Mark read** | Advances that agent's `poll_cursor`, clamped with `MAX()` so it can only move forward. The agent never sees the messages. Cosmetic in one specific sense: delivery is driven by the `since` each agent passes itself, so the cursor is what the *board* counts, not what the agent can still fetch. |
+| **Close / reassign a task** | Marks it done with a note, or moves the assignee. Never deletes — the row stays `done` and the log keeps the record. |
+| **Remove an agent** | Clears its backlog, closes its live MCP sessions, and hides the row behind a `retired` chip. |
+| **Archive a channel** | Puts it away for everyone — off the board, the floor, the picker, the filter and the Floor dropdown — and says so in the log. Nothing is deleted and agents on it keep working. It stays as a pill at the bottom of both views, and the pill restores it. Reachable from the floor too: **put away** on a storey, under "all floors", opens this same dialog. |
+| **Delete a channel** | Permanent. Sweeps messages, tasks, contracts and contract history in one transaction; guarded by having to type the channel name. |
+
+Two behaviours worth knowing before you use them:
+
+**A removed agent comes back by itself.** Retiring closes its sessions, and an
+unknown session id answers `404` — the spec's cue to re-initialize — so an
+agent that is genuinely still running reconnects and un-retires itself within
+a turn. Only one that is really gone stays gone. This is deliberate: an agent
+that is working while invisible on the board is a worse failure than a
+cluttered board. The flip side is that "remove" is not how you stop an agent;
+use the stop sign, or **Leave desk**.
+
+**Retired agents and archived channels are hidden, never dropped.** A retired
+agent keeps a count on screen (`1 retired`) that reveals it again; an archived
+channel is a pill at the bottom of the board, with its unread count on it.
+Silently omitting a row would make the board lie, which is the one thing it
+must not do.
+
+The floor says the same thing in its own vocabulary. A channel put away is not
+a storey in the building and is not in the floor picker; it is a pill under
+"all floors", the same pill the board draws, and clicking it there restores it
+too. The floor can put one away as well — **put away** on a storey, under "all
+floors", opens the board's channel dialog — so there is one archive, reached
+from either view. The two views agree on which floors exist: the board's
+channel list and the floor's are one list (a desk made by a hook event alone
+counts as a channel on both), so a floor archived from the floor is a pill on
+the board, and the two totals count the same set.
+
+Archived is a shared statement, so it is out of the floor's totals and out of
+the operator queue: the count of floors in this building is the same number
+for everyone looking at it, and a prompt in a room the team has put away
+should not read as "1 need you". A floor you were standing on that gets
+archived — by you or by anyone — lands you on all floors at the next poll.
+
+**An archived floor comes back by itself when something starts on it.** A
+desk taken there from Take a desk, a session connecting under its name, a
+desk's Claude Code starting on it — any of these restores the floor, and the log says
+what brought it back and who. Only a start counts: an agent already on the
+floor keeps working without bringing it back, because archive is not a
+session kill and the work it does not kill does not undo it.
+
+**A hidden desk does not.** The same flag one level down — **Hide desk** on
+a nameplate card — is cleared only by clicking its pill under the storey.
+None of the doors above touch it, and the agent coming back does not either;
+a desk you put away stays away until you say otherwise. Archive still wins:
+a hidden desk on a put-away floor is neither a desk nor a pill until the
+floor is back, because the pills live inside the storey.
+
+Deleting a channel removes it from the board but **not** from the activity
+log: `admin_events` is deliberately not swept, because an audit trail you can
+erase by deleting the thing it describes isn't one. The log goes on saying you
+deleted it, and what it contained.
+
+What guards these routes — and, deliberately, what doesn't — is described in
+[the security model](security.md).

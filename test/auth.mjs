@@ -105,7 +105,7 @@ try {
       },
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }),
     });
-    eq(wrong.status, 401, 'a wrong key → 401');
+    eq(wrong.status, 503, 'a wrong key → 503 on /mcp (not 401: Claude Code would remember it as needs-auth for every board named orchestratinator on the computer)');
 
     alpha = await makeClient('alpha');
     const who = await call(alpha.client, 'whoami');

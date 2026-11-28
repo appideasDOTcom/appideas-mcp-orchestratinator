@@ -401,7 +401,14 @@ on was measured on 2.1.330 before it was built
   tree (pc-developer, measured; a Job object would reach it, not built).
   The supervisor (`host/supervise.mjs`) holds a one-per-user lock (a named
   pipe) and stops the host when the process that started it is gone, which
-  is what Task Scheduler's End does to it (F3).
+  is what Task Scheduler's End does to it (F3). **Every console program
+  the host starts carries `windowsHide: true`** (0.15.2): under the
+  desktop app the host is a utility process with no console, so a child
+  without it opens a console window of its own, and `claude auth status`
+  runs at every heartbeat. The Docker install's host runs under
+  `conhost --headless` and never showed it. The exception is `wt.exe`
+  (Open in Claude), which is meant to be seen. A new spawn in `host/` takes
+  the flag; it does nothing off Windows, so only the PC can prove it.
 - **Claude Code's own records are never somebody's words**: a `<synthetic>`
   assistant record is a `context` line labeled `synthetic` ("No response
   requested."), "[Request interrupted by user…]" is a `context` line
@@ -437,6 +444,135 @@ anyone out), **diagnose-handoff** with reading a desk's process, and
 they still describe tmux, which holds for an interactive Claude Code only.
 Other skills mention tmux in passing (verify-ui-change, capture-a-burst,
 measure-the-desktop, recover-a-lost-record).
+
+## The service round: buildings, a relayed request, guests (M1 2026-11-24, M2 2026-11-25)
+
+costmo's brief that day: a paid service, for the **desktop app only** (the
+Docker app never connects to it), for agents on several computers in one
+building, and for operating your own board from a phone or
+app.orchestratinator.com. The plan, his eight decisions, the lanes and the
+milestones are the board contract `service.plan` (copy:
+[`docs/service/plan.md`](docs/service/plan.md)). The service is its own
+repo (`../orchestratinator-service`, Go, orchestratinator-service-developer),
+and the app's tunnel and hop are desktop-dev's. **coordinator is the one
+voice to costmo for the round**, and his decisions go to him by
+AskUserQuestion. Each milestone ends in a demo and a break for him, and
+nothing from the next one starts before his go.
+
+This repo's half of M1:
+- **Buildings** (`src/db.js`, `buildings`, `channel_flags.building_id`).
+  A bucket of floors and no more: a floor keeps its one name per board,
+  and nothing an agent does reads its building. Every board has one
+  default ("Main"), and a floor with no building of its own, or one
+  naming a building that isn't here, is in it. So every board from before
+  is unchanged. The page shows one building at a time: header chips once
+  there are two, `?building=` in the address, and Settings ▸ Buildings.
+  The scope is in `onBoard`/`putAway`, so every list on both views follows
+  it.
+- **A relayed request** (`src/relay.js`, contract `board.relay`, copy
+  [`docs/service/board-relay.md`](docs/service/board-relay.md)).
+  - The app's hop signs who a request is from (HMAC over a base64url
+    payload, keyed by `ORCH_RELAY_SECRET` as a string), and the board checks
+    it ahead of every route.
+  - A board with no secret refuses any relay header. It is never served as
+    local, which is why a forged header is refused rather than ignored.
+  - The CSRF lock compares the signed `origin`, since `Host` is the hop's.
+  - Audit rows name `<name> (remote)`.
+  - Five routes that open something on the board machine's own screen are
+    `409 relay_local_only`. The page leaves them out for a remote viewer
+    (`viewer` on both payloads).
+- **M2, a guest in an owner's building** (board.relay v4 to v6,
+  2026-11-25; costmo's decisions 12 to 15 in `service.plan`).
+  - **The guest role.** A relayed request may be role `guest`, carrying the
+    building ids its Key Card opens. It reaches those buildings' floors only
+    (`relay_guest_scope`), none of the board's administration, and no server
+    details.
+  - **Hosts and desks have operators.** A host registered through the relay
+    as a guest is that guest's (`hosts.operator`, its id `<op>~…`), and so
+    are its desks; the board remembers a guest's desk beyond its host row
+    (`desk_operators`).
+  - **Only a desk's own operator acts on it.** Answering its prompts,
+    stopping it, its model, opening, moving or reading its conversation, and
+    any slash command, are `desk_not_yours` to anyone else. Work for a host
+    is `host_not_yours` to anyone else, the owner included, so nobody starts
+    or drives another computer's Claude Code.
+  - **Talk runs both ways and names its sender.** The agent reads
+    `From <name>:`, and the page draws the name (`from` on a turn).
+  - **A revoke or an unshare drops the guest's desks at once.**
+    `POST /api/relay/access`, owner-signed, sent by the app's hop when the
+    service says so.
+  - **A room's note names both operators** when both are in it.
+  - **Bringing an existing agent in is the release path** (Take a desk on a
+    folder bound to the guest's own board). A second session for such a
+    folder is not built: the board refuses a seat for an `other_board`
+    folder.
+- **M3, an agent sends another a file** (contract board.files; costmo's
+  decision 21; [`docs/service/board-files.md`](docs/service/board-files.md)).
+  - The `send_file` board tool takes no channel or agent: the sender is
+    always the connection's own desk.
+  - The sender's own host reads the file (`host/uploads.js` sendFile) and
+    streams it to `POST /api/host/file`, which takes bytes only from the
+    host the board asked, for the transfer it made.
+  - The board then sends it to the receiver as an attachment, "From
+    <sender>:", listed as "Attached by <sender>:".
+  - A host says it can do this with `files: true` at registration.
+- **M3's finish** (2026-11-27, decisions 32–34): sharing is one toggle plus
+  Invite user for the owner, and one pasted code plus Join for the invitee,
+  over the service's relay alone. costmo walked it on two computers.
+  **walk-the-service** is the walk, hidden and with real email. What
+  carries into the next rounds (the soft launch with paid features hidden,
+  QA, then subscription testing) is the last section of `docs/service/plan.md`.
+- Tested by `npm run test:service` (both halves), the page checks
+  **check-buildings.mjs**, **check-relayed.mjs** (the page served through
+  `relay-hop.mjs`, a stand-in for the app's hop, from
+  `http://<b>.localhost`) and **check-guest.mjs** (two such hops, an owner
+  and a guest), and the mutant lists `mutants-service-m1.*` and
+  `mutants-service-m2.*`. The second guards that survive by design say so
+  in their comments.
+
+## The UI/UX round (costmo, 2026-11-27 and 28)
+
+Settings became three tabs in the desktop app, and this repo drew its
+half. What each piece is, and why it is that way, is on the code; the
+decisions are in `docs/service/plan.md` ("The UI/UX round", decisions 35
+and 36).
+- **`?settings=1&section=general|buildings`** (contract
+  `dashboard.settings`). The app's General tab shows every section but
+  Buildings, and its Sharing tab shows Buildings alone (nothing for a
+  guest). With no section, it is the whole page, as before.
+- **Buildings** are a row each:
+  - a checkmark for the default, which moves it (`POST
+    /api/admin/building/default`). Floors in the old default are written
+    into it first, so only floors made later land in the new one;
+  - the name is text until ✎, saved on Return and put back on Escape
+    (which is kept from the dialog);
+  - a trash can for an empty building that isn't the default;
+  - ⊕ opens a row being named;
+  - the section folds (`orch.buildingsFolded`, kept in this browser).
+- **The boards this operator was invited into** are a row of pills under
+  the header (`#guest-boards`, contract `orchestratinator.guest_boards`
+  v3 on the orchestratinator-desktop channel).
+  - The app knows the cards and calls `window.orchBoards.set(list)`. The
+    page hands every act back by `window.open` of its own address
+    (`?guest_board=<id>[&label=]`), because board pages have no preload.
+  - A state is an outline and a glyph (✓ ! –), never a colour alone.
+  - In a guest board's own window, its pill is `here`: a label, with
+    nothing to open or rename. The window's title becomes "<floor> ·
+    <label>" (`windowTitle`'s `board`). The page owns the title, and the
+    app only copies it.
+  - A browser never sees the row.
+- Tested by test:service ("the boards this operator was invited into",
+  the set-default rows), test:floor (`windowTitle`), and
+  **check-buildings.mjs**, which drives Buildings, the section views and
+  the row. On the real apps: **walk-the-service** (`guest-row.mjs`,
+  `buildings.mjs`, `tabs-about.mjs`).
+- **A built app (Mac or Windows) defaults to api.orchestratinator.com,
+  which does not resolve until the service launches**, so it reads "The
+  service didn't answer" at once. A session build has the dev service
+  baked in (`ORCH_BUILD_SERVICE`, the desktop repo's). How to make one is
+  in **catch-up-the-desktop-app**, "Session builds". Nothing of the
+  service, its builds, or where we test is published until costmo gives
+  the go (2026-11-28).
 
 ## Three boards, one of them ours
 
@@ -3168,6 +3304,35 @@ the app's agent goes.
 
 ## A host on Windows (feature/windows-implementation)
 
+**Who measures what on Windows is two roles, not two names, on a PC that
+comes and goes** (costmo, 2026-11-24). The PCs are fleet machines lent
+from E3 Webcasting, a related company we also write software for, and go
+back to the field. So expect a different PC, a different user profile and
+paths (`C:\Users\<someone>\…`), and different agent names from one round
+to the next, and read the board's `whoami` list for who is there now. The
+two roles: **the Docker install on Windows** (the Windows twin of the
+Mac's Docker board and launchd host; `pc-developer` in 2026-11) and **the
+desktop app on Windows** (the twin of orchestratinator-desktop-dev, which
+directs it; `windows-desktop-dev` in 2026-11). A change here that the app
+carries is proven in the app by the second; the Docker side by the first.
+A new PC starts with nothing: no Node 24 (portable Node, as the 2026-11
+rounds used), no Python or build tools, no clone, and possibly no GitHub
+ssh key. So a round on it begins with what is installed, measured, and a
+Windows finding names the PC it was read on.
+Below, "pc-developer" means the Docker role as it was on the PC of those
+rounds. **The desktop app shipped for Windows in
+0.15.2** (2026-11-24): a Squirrel Setup.exe, per user with no admin
+(costmo's pick), with Squirrel.Windows updates from `win32/x64/RELEASES`
+on the CDN, built on GitHub's Windows runner so a release needs no PC,
+and **unsigned by his decision** after Microsoft refused him an account
+for its signing service ("Windows users get no signed app… If Microsoft
+wants to pull their heads out of their asses, I might change my mind").
+Do not re-propose signing unless he raises it. The app's half is recorded
+in the desktop repo (`docs/desktop-app.md`, "Windows: …";
+`docs/release-checklist.md`). Windows users of the Docker install are not
+expected, and its update path on Windows is not worked on (his word, same
+day).
+
 2026-11-20, costmo's scope: the Docker install working on Windows, the
 desktop app later. Built from this folder and measured on his Windows 11 PC
 by **pc-developer**, a Claude Code desk on this floor running there (it
@@ -3234,7 +3399,19 @@ record.
   `ORCH_FOLDER_DIALOG` stand-in there must be an `.exe` (`node.exe` with
   `NODE_OPTIONS=--import` worked). Hooks run under Git Bash; a `node`
   installed after the terminal that started Claude Code is not on its PATH
-  until a new terminal.
+  until a new terminal. On the PC of the 0.15.0 round (pc-developer's
+  notes, 2026-11-23): `npm ci` needed `--ignore-scripts` (better-sqlite3's
+  install script went to node-gyp, which wants Python), and `test:update`,
+  `test:host`, `test:seats` and `test:agent` could not run on win32, so a
+  Windows round measures by hand and the suites run on the Mac.
+- **The Docker role's agent is bound to the Mac's app board through an SSH
+  tunnel** (`ssh -N -L 6724:127.0.0.1:6724 <user>@<the Mac>`, which costmo
+  starts in a window of its own; the agent does not have his Mac user).
+  After a reboot of the PC the tunnel is gone and every board tool reads
+  ECONNREFUSED until he starts it again and runs `/mcp`. Its own Docker
+  board on that PC's 8787 is the one it tests against, never 6724. The
+  whole setup, and a helper that prints what is still to do, is
+  **connect-to-a-remote-board**.
 - **"Teach auto mode about your environment?"** stood three desks dead on
   the PC on 2026-11-22, read as idle on the window layer
   (`docs/robustness-review.md` is pc-developer's write-up). On the process
@@ -3326,7 +3503,7 @@ day), and the host ran under launchd on the shell's Node 20. Now:
   measured, a real `docker build` of the round's tree loads it (SQLite
   3.53.4) on Node 24.22.2 / npm 11.19.1.
 
-`npm test` runs thirteen suites. `test:host` and `test:seats` are not unit
+`npm test` runs fourteen suites. `test:host` and `test:seats` are not unit
 tests: each runs a **real host** against a **real server**, and the host
 runs a stand-in Claude Code for each desk (`ORCH_HOST_CLAUDE`) that speaks
 stream-JSON the way 2.1.330 was measured to and writes what Claude Code
@@ -3719,6 +3896,7 @@ operator's live floor.
   | `src/uploads.js` | `test:floor`, and `test:host`, whose board runs it |
   | `host/uploads.js` | `test:host`, and `test:floor`, which reads its header |
   | `host/install.sh`, `host/node.sh`, `host/run.sh` | `test:host` (its install rows, on stand-ins) |
+  | `src/relay.js`, `src/files.js`, buildings in `src/db.js` / `src/web.js` | `test:service`, and **check-relayed.mjs** / **check-buildings.mjs** / **check-guest.mjs** for the page |
   | `scripts/set-version.mjs`, `scripts/check-lock.mjs` | `smoke` |
   | `Dockerfile`, `package.json`'s dependencies, `package-lock.json` | no suite: a real `docker build` in a scratch tag, `npm ls` inside it against the lock, and `node -v` against the gate's |
   | `scripts/release-gate.sh`, `scripts/coverage/` | themselves: a seeded red in a copy for the gate; for coverage, `report.mjs` over a known set of snapshots |
@@ -3779,7 +3957,10 @@ operator's live floor.
   the last message id the summary names. `poll_messages` with no `since`
   starts at 0, and on 2026-11-22 it returned the floor's oldest hundred
   (from id 2220, three weeks old), past the output limit, while the new
-  messages sat above them.
+  messages sat above them. With no id to hand, pass a `since` far above
+  any id (`99999999`): the board answers `since_ahead` and reads from its
+  own record of what you were given, which is exactly the unread
+  (measured 2026-11-24).
 - **The board keeps each agent's cursor, and another machine's board
   keeps its own.** `agents.poll_cursor` (one row per channel and agent)
   is the last message delivered to that agent. That row, against
