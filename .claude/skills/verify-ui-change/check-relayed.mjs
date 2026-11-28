@@ -36,10 +36,11 @@ ok(true, 'the floor draws its rooms through the hop');
 
 console.log('\na write passes the lock as the remote owner');
 await p.click('#open-settings');
-await until(p, `!!document.querySelector('#building-new')`, 'Settings has Buildings');
-await p.evalJs(`document.querySelector('#building-new').focus()`);
+await until(p, `!!document.querySelector('#set-buildings [data-set="building-add"]')`, 'Settings has Buildings');
+await p.click('#set-buildings [data-set="building-add"]');
+await until(p, `document.activeElement?.id === 'building-new'`, '⊕ opens a row being named');
 await p.type('Remote');
-await p.click('[data-set="building-create"]');
+await p.click('[data-set="building-save"][data-id="new"]');
 await until(p, `document.querySelectorAll('#building-pick [data-building]').length === 2`, 'the building is made');
 const row = await p.evalJs(`fetch('./api/activity?limit=20').then((r) => r.json()).then((j) => JSON.stringify(j.rows.find((r) => r.kind === 'admin.building.create')))`).then(JSON.parse);
 ok(row?.actor === 'Remote Owner (remote)', 'its audit row names the remote owner', JSON.stringify(row));
@@ -84,7 +85,9 @@ await p.goto(`${base}/?floor=alpha`);
 await openAnn(p);
 const there = await links(p);
 ok(!there.includes('handback') && !there.includes('claude'), 'remotely, neither is drawn', JSON.stringify(there));
-ok(await p.evalJs(`fetch('./api/floor').then((r) => r.json()).then((j) => JSON.stringify(j.viewer))`) === JSON.stringify({ remote: true, name: 'Remote Owner', machine }), 'the floor payload says the viewer is remote, by name, and names the board\'s computer');
+// The viewer has also carried `role` since board.relay v4 (M2); the owner's is 'owner' and carries no op.
+const viewer = JSON.parse(await p.evalJs(`fetch('./api/floor').then((r) => r.json()).then((j) => JSON.stringify(j.viewer))`));
+ok(viewer.remote === true && viewer.name === 'Remote Owner' && viewer.machine === machine && viewer.role !== 'guest' && !('op' in viewer), 'the floor payload says the viewer is remote, by name, and names the board\'s computer', JSON.stringify(viewer));
 ok(await k.evalJs(`fetch('./api/floor').then((r) => r.json()).then((j) => JSON.stringify(j.viewer))`) === '{"remote":false}', 'and at the keyboard, not');
 
 console.log('\nwhere the building is, said remotely');

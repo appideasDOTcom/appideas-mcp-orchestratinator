@@ -25,7 +25,6 @@ await b.keyboard.press('Escape');
 await b.waitForTimeout(400);
 ok((await b.locator(`[data-building-label="${lab}"]`).innerText()) === 'Walk Lab', 'Escape puts the name back');
 await b.locator(`[data-set="building-edit"][data-id="${lab}"]`).click();
-await b.keyboard.press('Control+A'); await b.keyboard.press('Meta+A');
 await b.keyboard.type('Walk Workshop');
 await b.keyboard.press('Enter');
 await b.locator(`[data-building-label="${lab}"]`, { hasText: 'Walk Workshop' }).waitFor({ timeout: 10000 });

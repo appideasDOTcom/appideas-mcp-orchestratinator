@@ -361,3 +361,21 @@ full QA. Communication goes through coordinator.
   - **The default building is a checkmark that moves**
     (`POST /api/admin/building/default`). Floors in the old default stay
     there, and only floors that arrive later land in the new one.
+- **Where the round stood when costmo came back** (2026-11-28 00:40Z).
+  Every part of the brief is built and has been walked on the dev service
+  and staging in hidden scratch apps:
+  - coordinator's end to end (walk-the-service, extended);
+  - desktop-dev's License walk.
+
+  The first walk found four faults in the app, and all four were fixed and
+  walked again:
+  - after a pause and a resume, the guest session took 5 minutes to come
+    back (now 31 s);
+  - ⚙ in a guest window opened the wrong page;
+  - the board button's name didn't say whose board it was;
+  - Sharing's spacing.
+
+  It also found two emails that named Settings' old layout. service-dev
+  fixed both, and they're live. costmo's steps are in `try-ux.md`. This
+  repo's part is in `c0882db`. The app, membership and the service wait
+  for his commit.

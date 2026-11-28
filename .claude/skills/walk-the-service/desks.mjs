@@ -11,7 +11,7 @@ console.log('guest sees hosts', JSON.stringify(await hostsOf(g)));
 const ownHost = (await hostsOf(o)).find((h) => h.live && !/~/.test(h.id))?.id;
 const guestHost = (await hostsOf(g)).find((h) => h.live && /~/.test(h.id))?.id;
 console.log({ ownHost, guestHost });
-for (const [page, host, path, agent] of [[o, ownHost, '/private/tmp/cw-owner-agent', 'owner-agent'], [g, guestHost, '/private/tmp/cw-partner-agent', 'partner-agent']]) {
+for (const [page, host, path, agent] of [[o, ownHost, (process.env.OWNER_DIR ?? '/private/tmp/cw-owner-agent'), 'owner-agent'], [g, guestHost, (process.env.PARTNER_DIR ?? '/private/tmp/cw-partner-agent'), 'partner-agent']]) {
   console.log(agent, 'browse', JSON.stringify(await api(page, './api/floor/browse', { host_id: host, path })).slice(0, 200));
   await sleep(2500);
   console.log(agent, 'desk', JSON.stringify(await api(page, './api/floor/desk', { host_id: host, path, channel: 'walk', agent })).slice(0, 300));

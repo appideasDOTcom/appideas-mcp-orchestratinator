@@ -120,6 +120,46 @@ and unset every `ORCH_` variable.
    and report: the shots in `$TMPDIR/walk-the-service/shots/`, and what
    each says.
 
+## The UI/UX round's steps (2026-11-27)
+
+Settings is in tabs since then (General | Sharing | About), and every
+script that touches Sharing clicks the tab first (`tab()` in lib.mjs). The
+board's own settings views are pages of their own over CDP
+(`boardView(port, 'buildings' | 'general')`). A pane screenshot holds the
+app's rows only, and a full-page one of it can draw them twice: that is
+the capture, not the page (measured: one tab strip in the DOM).
+
+- `node tabs-about.mjs <port> <label> <scratch name>`: the tabs, About's
+  name, version and logo, and both links. The links are buttons the app
+  opens in the person's browser, so the address is read from
+  `opened-urls.txt`. A reused Settings window opens on the tab it was
+  left on.
+- `node owner-free-invite.mjs <port> <invitee>`: when an earlier walk's
+  board holds the plan's slot, it presses the pane's own Stop sharing.
+  That retries the refused invite by itself, so don't Send again: a
+  second invitation to the same address mints a new code and retires the
+  first.
+- `node buildings.mjs <port> <label>`: Buildings in the Sharing tab, by
+  real keys (⊕, Return, ✎ with Escape, ✎ with Return, the checkmark, the
+  trash can, the fold).
+- `node guest-row.mjs <owner port> <invitee port> <label>`: the
+  guest-board row on the invitee's floor (green; red after the owner's
+  pause; green again; a click opens the owner's floor; the rename survives
+  a reload).
+- `desks.mjs` takes `OWNER_DIR` and `PARTNER_DIR`. A folder an earlier
+  walk bound to another board is refused `other_board`, so use fresh
+  folders.
+
+Found by the first run, and given to desktop-dev:
+- After pause and resume, the invitee's guest host was down for over 5
+  minutes. Read `<scratch>/profile/logs/guest-host-<board>.log`.
+- ⚙ in a guest window opened the owner's board's settings page as a plain
+  window.
+- The pill's default name was only the computer's.
+- The Sharing tab's spacing.
+
+Licensing (About ▸ License with a key) is desktop-dev's walk.
+
 ## What this walk has found, so the next one looks for it
 
 - **A board from an earlier walk or install held Town's one building
