@@ -530,6 +530,50 @@ This repo's half of M1:
   `mutants-service-m2.*`. The second guards that survive by design say so
   in their comments.
 
+## The UI/UX round (costmo, 2026-11-27 and 28)
+
+Settings became three tabs in the desktop app, and this repo drew its
+half. What each piece is, and why it is that way, is on the code; the
+decisions are in `docs/service/plan.md` ("The UI/UX round", decisions 35
+and 36).
+- **`?settings=1&section=general|buildings`** (contract
+  `dashboard.settings`). The app's General tab shows every section but
+  Buildings, and its Sharing tab shows Buildings alone (nothing for a
+  guest). With no section, it is the whole page, as before.
+- **Buildings** are a row each:
+  - a checkmark for the default, which moves it (`POST
+    /api/admin/building/default`). Floors in the old default are written
+    into it first, so only floors made later land in the new one;
+  - the name is text until ✎, saved on Return and put back on Escape
+    (which is kept from the dialog);
+  - a trash can for an empty building that isn't the default;
+  - ⊕ opens a row being named;
+  - the section folds (`orch.buildingsFolded`, kept in this browser).
+- **The boards this operator was invited into** are a row of pills under
+  the header (`#guest-boards`, contract `orchestratinator.guest_boards`
+  v3 on the orchestratinator-desktop channel).
+  - The app knows the cards and calls `window.orchBoards.set(list)`. The
+    page hands every act back by `window.open` of its own address
+    (`?guest_board=<id>[&label=]`), because board pages have no preload.
+  - A state is an outline and a glyph (✓ ! –), never a colour alone.
+  - In a guest board's own window, its pill is `here`: a label, with
+    nothing to open or rename. The window's title becomes "<floor> ·
+    <label>" (`windowTitle`'s `board`). The page owns the title, and the
+    app only copies it.
+  - A browser never sees the row.
+- Tested by test:service ("the boards this operator was invited into",
+  the set-default rows), test:floor (`windowTitle`), and
+  **check-buildings.mjs**, which drives Buildings, the section views and
+  the row. On the real apps: **walk-the-service** (`guest-row.mjs`,
+  `buildings.mjs`, `tabs-about.mjs`).
+- **A built app (Mac or Windows) defaults to api.orchestratinator.com,
+  which does not resolve until the service launches**, so it reads "The
+  service didn't answer" at once. A session build has the dev service
+  baked in (`ORCH_BUILD_SERVICE`, the desktop repo's). How to make one is
+  in **catch-up-the-desktop-app**, "Session builds". Nothing of the
+  service, its builds, or where we test is published until costmo gives
+  the go (2026-11-28).
+
 ## Three boards, one of them ours
 
 Desks on this machine point at three different servers. **Only

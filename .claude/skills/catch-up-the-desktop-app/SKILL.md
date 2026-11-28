@@ -217,6 +217,39 @@ the one thing that did not:
   dispositions for the ⧉ and a ⌘-click were its to read (3569, 3579), not
   ours to assume.
 
+## Session builds: a Mac app and a Windows installer of develop, for costmo's own machines
+
+He runs sessions on two computers from built apps (2026-11-28). These are
+not releases, and nothing about them is published: no CDN, no tap, no
+GitHub release. They go to `~/Downloads` and his PC only.
+
+- **The service address is baked in at build time:** `ORCH_BUILD_SERVICE`
+  (and `_SITE`), read by the desktop repo's forge.config.ts.
+  - Without it, a packaged app talks to api.orchestratinator.com, which is
+    NXDOMAIN until the service launches, so every built app reads "The
+    service didn't answer" at once.
+  - About says "Test build · Service: …".
+  - release.mjs, release:windows and publish:release refuse such a build.
+- **Windows is GitHub's machine, never the PC** (a fresh PC has no Python
+  or build tools for native modules):
+  1. `gh workflow run windows-release.yml --ref develop -f service=https://orchestratinator-dev.ngrok.dev`,
+     run in orchestratinator-desktop. It takes about 6 minutes.
+  2. `gh run watch <id> --exit-status`.
+  3. `gh run download <id> -n windows-x64 -D <dir>`, then check each file
+     against its `SHA256SUMS` and `build.json` (commit and version).
+
+  orchestratinator-desktop is a private repo, so the artifact stays
+  private.
+- **The Mac app is `npm run make` with `ORCH_BUILD_SERVICE` set**,
+  unsigned and not notarized: it runs on his own Mac, and nothing goes to
+  Apple. It is the same app as `/Applications/Orchestratinator.app` (the
+  same profile, and board port 6724), so it replaces his running app
+  rather than sitting beside it. Installing it is his.
+- Build both from **one pushed commit**, read live (`git fetch`, then
+  `git log origin/develop`), and check the app's pin names the
+  Orchestratinator commit you mean. A version equal to the published one
+  (0.15.2 at the time) is never offered an update.
+
 ## What was learned the hard way
 
 - **The app's user already runs Claude Code and is signed in** (costmo,

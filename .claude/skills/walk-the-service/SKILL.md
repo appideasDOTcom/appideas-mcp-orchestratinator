@@ -150,6 +150,28 @@ the capture, not the page (measured: one tab strip in the DOM).
   walk bound to another board is refused `other_board`, so use fresh
   folders.
 
+- `node rewalk-f.mjs <owner port> <invitee port> <label>`: the four
+  findings below, walked again:
+  - the pill's name;
+  - pause and share again: the guest host is back on the owner's board and
+    Settings agrees (31 s on the fixed build);
+  - ⚙ in a guest window opens the app's pane;
+  - the Sharing tab's spacing, measured.
+
+**Walking code nobody has committed yet.** `npm run scratch` copies the
+build copy's node_modules (`$TMPDIR/orch-desktop-copy`) into the scratch
+app at every start, and then builds. So:
+- this repo's uncommitted `src/` and `host/` reach a walk only when they
+  are rsynced over `orch-desktop-copy/node_modules/appideas-mcp-orchestratinator/`
+  first (desktop-dev did that for this round, and put the pin back after);
+- check with `shasum -a 256` of `src/ui/app.js` in the copy against the
+  tree;
+- never touch the copy while desktop-dev's mutation run is using it.
+
+To take a new build without losing a walk's accounts and invitation,
+stop the two apps and start them again **without `--fresh`**. Their
+profiles stay, and they rebuild.
+
 Found by the first run, and given to desktop-dev:
 - After pause and resume, the invitee's guest host was down for over 5
   minutes. Read `<scratch>/profile/logs/guest-host-<board>.log`.
