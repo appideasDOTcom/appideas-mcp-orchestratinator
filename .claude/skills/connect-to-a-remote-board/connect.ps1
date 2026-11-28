@@ -90,7 +90,9 @@ if ($h -and $env:ORCH_KEY -and -not $wrong) {
     "key: accepted (HTTP $($r.StatusCode))"
   } catch {
     $code = $_.Exception.Response.StatusCode.value__
-    "key: " + $(if ($code -eq 401) { 'REFUSED (401): not this board''s key' } else { "HTTP $code" })
+    # 503 since 0.16.0 (mcpGuard in src/auth.js: a 401 is remembered by Claude
+    # Code as needs-auth for every board of that name); 401 from a board before it.
+    "key: " + $(if ($code -eq 503 -or $code -eq 401) { "REFUSED ($code): not this board's key" } else { "HTTP $code" })
   }
 }
 

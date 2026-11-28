@@ -486,6 +486,12 @@ try {
     const st = (await fetch(`${B}/mcp`, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...sign(guest()), 'x-orchestratinator-key': KEY, 'x-channel': 'open-floor', 'x-agent': 'odev' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 't', version: '1' } } }) })).status;
     eq(st, 503, 'and the refusal on /mcp is a 503, which Claude Code does not remember as an auth failure for every desk');
     eq((await fetch(`${B}/api/floor/interrupt`, { method: 'POST', headers: { 'content-type': 'application/json', ...hdr(guest()) }, body: JSON.stringify({ channel: 'open-floor', agent: 'odev' }) })).status, 403, 'off /mcp, the same refusal stays a 403');
+    // The relay's own refusals too (QA, PR #66 L3): a hop whose secret
+    // drifted, or a stale clock, must not mark every desk needs-auth.
+    const forged = Object.fromEntries(Object.entries(sign(guest())).map(([k, v]) => [k, /sig/i.test(k) ? `x${v.slice(1)}` : v]));
+    const bad = await fetch(`${B}/mcp`, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...forged, 'x-orchestratinator-key': KEY, 'x-channel': 'open-floor', 'x-agent': 'gdev' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }) });
+    eq([bad.status, (await bad.json()).code], [503, 'relay_bad_signature'], 'a signature that does not verify, on /mcp: 503, its code still said');
+    eq((await fetch(`${B}/api/floor`, { headers: forged })).status, 403, 'and off /mcp the same signature stays a 403');
     assert(!['desk_not_yours', 'relay_guest_scope'].includes(await mcp('open-floor', 'gdev', guest())), 'its own desk, on its own floor: let through');
     const fresh = await mcp('open-floor', 'newcomer', guest());
     assert(!['desk_not_yours', 'relay_guest_scope'].includes(fresh), `a name no desk holds, on its floor: let through (${fresh})`);

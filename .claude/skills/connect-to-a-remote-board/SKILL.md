@@ -56,7 +56,8 @@ its "still to do" part as it printed, and the JSON in a code block.
   Mac). The start itself has not been run, because no key was on the Mac.
 - **A key to check** goes in `$env:ORCH_KEY` for the run, never as an
   argument; the helper does an MCP `initialize` with it and says accepted
-  (200) or refused (401). Measured both on 2026-11-24.
+  (200) or refused (503; 401 from a board before 0.16.0). Measured both on
+  2026-11-24, when the refusal was still 401.
 - **A local port that is taken** by anything that is not a tunnel to that
   address is named, its `/health` is labelled as that program's and not
   the remote board's, and the key is not tried against it; pass

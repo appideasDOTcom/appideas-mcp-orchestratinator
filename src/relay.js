@@ -226,7 +226,12 @@ export function createRelay({ env = process.env } = {}) {
       origin: header(req, 'origin'),
     };
     const r = checkRelay({ headers, secret });
-    if (r.error) return res.status(r.status).json({ error: r.error, code: r.code });
+    // On /mcp a 401 or 403 is a 503, as in scope() below and mcpGuard
+    // (src/auth.js): Claude Code remembers a 401/403 as "needs
+    // authentication" for every board named orchestratinator on that
+    // computer, so a hop whose secret drifted would strand every relayed
+    // desk. The body still says why (QA, PR #66 L3).
+    if (r.error) return res.status(/^\/mcp(\/|$)/.test(req.path) && (r.status === 401 || r.status === 403) ? 503 : r.status).json({ error: r.error, code: r.code });
     if (!r.payload) return next();
     req.relay = r.payload;
     const refusal = LOCAL_ONLY.get(`${req.method} ${req.path}`);
