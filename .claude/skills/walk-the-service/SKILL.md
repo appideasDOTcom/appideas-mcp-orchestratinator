@@ -158,6 +158,13 @@ the capture, not the page (measured: one tab strip in the DOM).
   - ⚙ in a guest window opens the app's pane;
   - the Sharing tab's spacing, measured.
 
+- `node here-license.mjs <owner port> <invitee port> <label>`: in a
+  window on the owner's board, its own pill is HERE (a label: a click or
+  right-click does nothing, and the window's title names the board). The
+  invitee, connected with no license, finds Share my buildings disabled,
+  with "Sharing your buildings needs a license." and Add a license, which
+  goes to About. Passed on the session-build code (85cb19c), 2026-11-28.
+
 **Walking code nobody has committed yet.** `npm run scratch` copies the
 build copy's node_modules (`$TMPDIR/orch-desktop-copy`) into the scratch
 app at every start, and then builds. So:

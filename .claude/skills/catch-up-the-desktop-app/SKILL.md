@@ -236,7 +236,11 @@ GitHub release. They go to `~/Downloads` and his PC only.
      run in orchestratinator-desktop. It takes about 6 minutes.
   2. `gh run watch <id> --exit-status`.
   3. `gh run download <id> -n windows-x64 -D <dir>`, then check each file
-     against its `SHA256SUMS` and `build.json` (commit and version).
+     against its `SHA256SUMS` and `build.json` (commit, version, service).
+     The sums are written on Windows with CRLF, so `shasum -c` reads every
+     name with a `\r` on it and finds no file. Strip them first:
+     `tr -d '\r' < SHA256SUMS > /tmp/sums && shasum -a 256 -c /tmp/sums`.
+     The installer is `Orchestratinator-<version> Setup.exe`, with a space.
 
   orchestratinator-desktop is a private repo, so the artifact stays
   private.
