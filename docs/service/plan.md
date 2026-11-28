@@ -379,3 +379,17 @@ full QA. Communication goes through coordinator.
   fixed both, and they're live. costmo's steps are in `try-ux.md`. This
   repo's part is in `c0882db`. The app, membership and the service wait
   for his commit.
+- **From costmo's own walk** (2026-11-28, on the Mac Mini and the PC):
+  - **The board row in a guest board's window.** Its own button opened a
+    second copy of the board. It's now an information-only label (HERE),
+    and the window's title names the board ("<floor> · <owner>’s
+    <computer>"). `orchestratinator.guest_boards` v3.
+  - **Share my buildings is disabled for an account with no active
+    license**, with one line saying why and a link to About ▸ License.
+    Not connected yet, it stays enabled, because ticking it is the sign-in
+    (decision 32) and the plan isn't known before then. desktop-dev's.
+  - **Claude sign-in on Windows is measured, several times** (his word).
+    Nothing here treats it as open.
+  - **On the PC, connecting with a key read "The service didn't answer" at
+    once.** The same works from the Mac Mini. He chose not to chase it now,
+    so it's carried to the QA round, Windows desktop-app role.

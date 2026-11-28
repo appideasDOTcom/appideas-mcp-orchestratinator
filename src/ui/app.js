@@ -226,16 +226,23 @@ function guestBoardsList(raw) {
     const label = typeof b.label === 'string' && b.label.trim() ? b.label.trim() : name;
     const state = Object.hasOwn(GUEST_STATES, b.state) ? b.state : 'unknown';
     const why = typeof b.why === 'string' && b.why.trim() ? b.why.trim() : null;
-    out.push({ id, name, label, state, why });
+    // The board this window is showing (the app says it: only the app knows
+    // which window is which board). Drawn as a label, not a button: a click
+    // there opened a second copy of the board the person was already on
+    // (costmo, 2026-11-28). One at most.
+    const here = b.here === true && !out.some((x) => x.here);
+    out.push({ id, name, label, state, why, here });
   }
   return out;
 }
+/** The board this window shows, when it is one of them: its label names the window (windowTitle in floor.js). */
+function guestBoardHere(list) { return list.find((b) => b.here) ?? null; }
 /** What a button says on hover: its state's word, the board's own name when a label hides it, and the app's reason. */
 function guestBoardTitle(b) {
   const parts = [`${b.label} — ${GUEST_STATES[b.state].word}`];
   if (b.label !== b.name) parts.push(`(${b.name})`);
   if (b.why) parts.push(`\n${b.why}`);
-  parts.push('\nClick to open it in a new window. Right-click to rename.');
+  parts.push(b.here ? '\nYou are on this board, in this window.' : '\nClick to open it in a new window. Right-click to rename.');
   return parts.join(' ');
 }
 /** The address the app's open handler takes: open the board, or keep a label for it ('' puts the board's own name back). */
@@ -245,11 +252,17 @@ function guestBoardUrl(path, id, label = null) {
   return `${path}?${q.toString()}`;
 }
 function guestBoardsHtml(list) {
-  return list.map((b) => `<span class="gb ${b.state}" data-guest-board="${esc(b.id)}">
+  return list.map((b) => (b.here
+    ? `<span class="gb ${b.state} here" data-guest-board="${esc(b.id)}">
+      <span class="gb-open gb-here" aria-current="page" title="${esc(guestBoardTitle(b))}" aria-label="${esc(b.label)}: you are on this board (${esc(GUEST_STATES[b.state].word)})">
+        <span class="gb-glyph" aria-hidden="true">${GUEST_STATES[b.state].glyph}</span><span class="gb-label">${esc(b.label)}</span><span class="gb-win" aria-hidden="true">here</span>
+      </span>
+    </span>`
+    : `<span class="gb ${b.state}" data-guest-board="${esc(b.id)}">
       <button type="button" class="gb-open" data-gb="open" title="${esc(guestBoardTitle(b))}" aria-label="Open ${esc(b.label)} in a new window (${esc(GUEST_STATES[b.state].word)})">
         <span class="gb-glyph" aria-hidden="true">${GUEST_STATES[b.state].glyph}</span><span class="gb-label">${esc(b.label)}</span><span class="gb-win" aria-hidden="true">⧉</span>
       </button>
-    </span>`).join('');
+    </span>`)).join('');
 }
 
 /* ---------- end guest boards ---------- */
@@ -350,17 +363,19 @@ document.getElementById('guest-boards')?.addEventListener('click', (e) => {
 });
 document.getElementById('guest-boards')?.addEventListener('contextmenu', (e) => {
   const chip = e.target.closest('[data-guest-board]');
-  if (!chip || guestBoards.renaming) return;
+  // The board this window shows is information only: nothing to open, nothing to rename here.
+  if (!chip || guestBoards.renaming || chip.classList.contains('here')) return;
   e.preventDefault();
   guestBoardRename(chip);
 });
 document.getElementById('guest-boards')?.addEventListener('keydown', (e) => {
   const chip = e.target.closest?.('[data-guest-board]');
-  if (chip && e.key === 'F2' && !guestBoards.renaming) { e.preventDefault(); guestBoardRename(chip); }
+  if (chip && e.key === 'F2' && !guestBoards.renaming && !chip.classList.contains('here')) { e.preventDefault(); guestBoardRename(chip); }
 });
 window.orchBoards = {
   set: (list) => { guestBoards.list = guestBoardsList(list); drawGuestBoards(); return guestBoards.list.length; },
   get: () => guestBoards.list.map((b) => ({ ...b })),
+  here: () => { const b = guestBoardHere(guestBoards.list); return b ? { ...b } : null; },
 };
 
 /* ---------- formatting ---------- */

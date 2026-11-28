@@ -197,7 +197,25 @@ await until(p, `window.__opened.length === 2`, 'Return asks the app to keep it')
 ok(await p.evalJs(`window.__opened[1]`) === '/?guest_board=brd_c&label=Home+lab', 'with the label', await p.evalJs(`window.__opened[1]`));
 ok(await p.evalJs(`document.querySelector('[data-guest-board="brd_c"] .gb-label').textContent === 'Home lab'`), 'and draws it at once');
 await p.shot(`${shots}/guest-boards.png`, null, { scale: 1 });
+console.log('\nin a window on one of those boards, its button is a label, and the title says whose');
+await p.evalJs(`window.__opened = []; window.orchBoards.set([
+  { id: 'brd_a', name: "Pat's Mac", state: 'available', here: true },
+  { id: 'brd_b', name: 'Studio', state: 'available' } ])`);
+await until(p, `!!document.querySelector('#guest-boards .gb.here')`, 'the board here is drawn');
+ok(await p.evalJs(`!document.querySelector('#guest-boards .gb.here button') && document.querySelector('#guest-boards .gb.here [aria-current="page"]') !== null`), 'it is no button: a label, current');
+await p.press('#guest-boards .gb.here .gb-open');
+await sleep(400);
+ok(await p.evalJs(`window.__opened.length === 0`), 'a click on it opens nothing', await p.evalJs(`JSON.stringify(window.__opened)`));
+await p.press('#guest-boards .gb.here .gb-open', '#guest-boards .gb.here .gb-open', { button: 'right' });
+await sleep(400);
+ok(await p.evalJs(`!document.querySelector('#guest-boards .gb-input')`), 'nor does a right-click: it is information only');
+await p.press('[data-guest-board="brd_b"] .gb-open');
+await until(p, `window.__opened.length === 1`, 'the other board still opens');
+await until(p, `document.title.endsWith(" · Pat's Mac")`, 'the window\'s title names the board, after the floor');
+ok(true, `title: ${await p.evalJs('document.title')}`);
+await p.shot(`${shots}/guest-boards-here.png`, '#guest-boards', { scale: 2 });
 await p.evalJs(`window.orchBoards.set([])`);
+await until(p, `!document.title.includes("Pat's Mac")`, 'and without it, the app\'s name comes back');
 ok(await p.evalJs(`document.getElementById('guest-boards').hidden`), 'an empty list takes the row away');
 
 console.log(fails ? `\nFAIL · ${fails} of ${total} red` : `\nPASS · ${total} of ${total}`);

@@ -5641,12 +5641,17 @@
    * payload when nothing says which floor: index.html's title stands.
    */
   const TITLE_TAIL = 'orchestratinator';
-  function windowTitle({ view, floor, floors }) {
+  function windowTitle({ view, floor, floors, board = null }) {
     const head = view === 'board' ? 'Board'
       : floor ? floor
         : floors?.length === 1 ? floors[0]
           : floors?.length ? 'All floors' : null;
-    return head ? `${head} · ${TITLE_TAIL}` : null;
+    // A window on a board the person was invited to says whose it is in
+    // place of the app's name (costmo, 2026-11-28: "the window needs a
+    // matching label"), the same words as its button in the row. The floor
+    // stays first, for the reason above.
+    const tail = typeof board === 'string' && board.trim() ? board.trim() : TITLE_TAIL;
+    return head ? `${head} · ${tail}` : null;
   }
 
   /**
@@ -8396,7 +8401,7 @@
     if (next !== location.search) {
       try { history.replaceState(history.state, '', `${location.pathname}${next}${location.hash}`); } catch { /* the address is only for a reload */ }
     }
-    const title = windowTitle({ view, floor: ui.floorFilter, floors: ui.floorNames });
+    const title = windowTitle({ view, floor: ui.floorFilter, floors: ui.floorNames, board: window.orchBoards?.here?.()?.label ?? null });
     if (title && document.title !== title) document.title = title;
   }
 

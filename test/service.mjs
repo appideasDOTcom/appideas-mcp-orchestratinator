@@ -219,7 +219,7 @@ try {
     assert(a > 0 && b > a, 'the section is where its markers say');
     const tmp = `./data/guest-boards-${process.pid}.mjs`;
     const escFn = `const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));\n`;
-    writeFileSync(tmp, `${escFn}${src.slice(a, b)}\nexport { guestBoardsList, guestBoardTitle, guestBoardUrl, guestBoardsHtml };\n`);
+    writeFileSync(tmp, `${escFn}${src.slice(a, b)}\nexport { guestBoardsList, guestBoardTitle, guestBoardUrl, guestBoardsHtml, guestBoardHere };\n`);
     let m;
     try { m = await import(new URL(tmp, `file://${process.cwd()}/`)); } finally { rmSync(tmp, { force: true }); }
     eq(m.guestBoardsList(null), [], 'nothing said is no boards');
@@ -241,6 +241,16 @@ try {
     const html = m.guestBoardsHtml(list);
     for (const [state, glyph] of [['available', '✓'], ['blocked', '!'], ['unknown', '–']]) assert(html.includes(`class="gb ${state}"`) && html.includes(`>${glyph}</span>`), `${state} is an outline class and a glyph (${glyph}), never a colour alone`);
     assert(m.guestBoardsHtml(m.guestBoardsList([{ id: 'x', name: '<img>' }])).includes('&lt;img&gt;'), 'a board\'s name is escaped');
+    // The board this window shows is a label, never a button that opens a second copy of it (costmo, 2026-11-28).
+    const two = m.guestBoardsList([{ id: 'a', name: 'A', here: true, state: 'available' }, { id: 'b', name: 'B', here: true }, { id: 'c', name: 'C', here: 'yes' }]);
+    eq(two.map((x) => x.here), [true, false, false], 'one board at most is here, and only when the app says true');
+    eq(m.guestBoardHere(two)?.id, 'a', 'and the page can name it');
+    eq(m.guestBoardHere(m.guestBoardsList([{ id: 'a' }])), null, 'none, in the person\'s own window');
+    const hh = m.guestBoardsHtml(two);
+    const hereChip = hh.slice(0, hh.indexOf('data-guest-board="b"'));
+    assert(hereChip.includes('aria-current="page"') && !hereChip.includes('data-gb="open"') && !hereChip.includes('<button'), 'the board here is a label: no button, nothing that opens');
+    assert(hh.slice(hh.indexOf('data-guest-board="b"')).includes('data-gb="open"'), 'the others still open');
+    assert(m.guestBoardTitle(two[0]).includes('You are on this board'), 'its hover says so');
   }
 
   console.log('\nthe page: what it says when its board does not answer');

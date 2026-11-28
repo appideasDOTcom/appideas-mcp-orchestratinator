@@ -3833,6 +3833,9 @@ try {
     eq(t({ view: 'floor', floor: 'lab', floors: null }), 'lab · orchestratinator', 'before the first payload, a floor the address named is the title already');
     eq(t({ view: 'floor', floor: null, floors: null }), null, 'and with nothing said and nothing drawn, the page\'s own title stands');
     eq(t({ view: 'floor', floor: null, floors: [] }), null, 'nor with no floors at all');
+    // A window on a board the person was invited to (costmo, 2026-11-28).
+    eq(t({ view: 'floor', floor: 'lab', floors: ['lab'], board: 'Walk Owner’s costmo4.local' }), 'lab · Walk Owner’s costmo4.local', 'a guest board\'s window says whose board, in place of the app\'s name, the floor still first');
+    eq(t({ view: 'floor', floor: null, floors: ['a', 'b'], board: '  ' }), 'All floors · orchestratinator', 'an empty label is no label');
 
     const click = (o) => page.opensElsewhere({ button: 0, metaKey: false, ctrlKey: false, shiftKey: false, altKey: false, ...o });
     eq([click({}), click({ altKey: true })], [false, false], 'a plain click, and an Alt-click, ride to the floor in this tab');
